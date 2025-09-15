@@ -20,4 +20,5 @@ bin
 # Project-specific environment variables, powered by direnv
 .envrc
 
-devflow-agent.2025-09-14.private-key.pem
+*.pem
+private-key.pem
