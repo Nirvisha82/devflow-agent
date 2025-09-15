@@ -1,0 +1,13 @@
+# Environment and secrets
+.env
+*.pem
+private-key.pem
+secrets/
+
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+vendor/
