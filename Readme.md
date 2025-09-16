@@ -69,7 +69,12 @@ go run main.go
 
 ```bash
 smee --url WEBHOOK_PROXY_URL --path / --port <port-id>  # note the port id from prev. step.
+smee --url https://smee.io/Dtgyfv0N4x0BOYkG --path / --port 8000 
 ```
 
 ---
 The app now listens to events sent by GitHub from connected repositories.
+
+Todos:
+Create a branch and raise a PR - Once the issue is recieved, on parsing the description, the repository must be cloned and then a branch must be created with issues title or id or number or any xyz naming convention.
+Then we must be able to accesss a particular file `devflow-config`, `CODEOWNERS` etc.
