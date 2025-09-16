@@ -1,4 +1,4 @@
-package main
+package repository
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/swinton/go-probot/probot"
 )
 
-func cloneRepositoryTemp(repoName string) (string, func(), error) {
+func CloneRepositoryTemp(repoName string) (string, func(), error) {
 	cloneURL := fmt.Sprintf("https://github.com/%s.git", repoName)
 	repoDir := fmt.Sprintf("temp_%s_%d", strings.Replace(repoName, "/", "_", -1), time.Now().Unix())
 
@@ -37,7 +37,7 @@ func cloneRepositoryTemp(repoName string) (string, func(), error) {
 	return repoDir, cleanup, nil
 }
 
-func testProbotAuth(ctx *probot.Context, repoName string) {
+func TestProbotAuth(ctx *probot.Context, repoName string) {
 	parts := strings.Split(repoName, "/")
 	owner := parts[0]
 	repo := parts[1]

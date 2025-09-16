@@ -1,4 +1,4 @@
-package main
+package repository
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"github.com/swinton/go-probot/probot"
 )
 
-func createBranchWithProbot(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
-	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, sanitizeBranchName(issueTitle))
+func CreateBranchWithProbot(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
+	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, SanitizeBranchName(issueTitle))
 
 	log.Printf("🌿 Creating branch on GitHub: %s", branchName)
 
@@ -45,7 +45,7 @@ func createBranchWithProbot(ctx *probot.Context, repoName string, issueNumber in
 	return nil
 }
 
-func sanitizeBranchName(title string) string {
+func SanitizeBranchName(title string) string {
 	sanitized := strings.ReplaceAll(title, " ", "-")
 	sanitized = strings.ToLower(sanitized)
 	if len(sanitized) > 20 {

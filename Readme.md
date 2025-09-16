@@ -68,7 +68,7 @@ go run main.go
 2. Configure the events stream.
 
 ```bash
-smee --url WEBHOOK_PROXY_URL --path / --port <port-id>  # note the port id from prev. step.
+smee --url $WEBHOOK_PROXY_URL --path / --port $PORT_ID  # note the port id from prev. step.
 smee --url https://smee.io/Dtgyfv0N4x0BOYkG --path / --port 8000 
 ```
 
