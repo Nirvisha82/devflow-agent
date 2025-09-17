@@ -3,17 +3,14 @@ package repository
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/google/go-github/github"
 	"github.com/swinton/go-probot/probot"
 )
 
-func CreateBranchWithProbot(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
-	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, SanitizeBranchName(issueTitle))
-
-	log.Printf("🌿 Creating branch on GitHub: %s", branchName)
+func CreateBranch(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
 
 	// Split repo name
 	parts := strings.Split(repoName, "/")
@@ -23,10 +20,12 @@ func CreateBranchWithProbot(ctx *probot.Context, repoName string, issueNumber in
 	// Get main branch reference
 	mainRef, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/main")
 	if err != nil {
-		log.Printf("❌ Failed to get main ref: %v", err)
+		slog.Error("Clone Failed", "error", err)
 		return err
 	}
 
+	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, SanitizeBranchName(issueTitle))
+	slog.Info("Creating branch on GitHub", "branch", branchName)
 	// Create new branch reference
 	newRef := &github.Reference{
 		Ref: github.String("refs/heads/" + branchName),
@@ -37,11 +36,11 @@ func CreateBranchWithProbot(ctx *probot.Context, repoName string, issueNumber in
 
 	_, _, err = ctx.GitHub.Git.CreateRef(context.Background(), owner, repo, newRef)
 	if err != nil {
-		log.Printf("❌ Failed to create branch: %v", err)
+		slog.Error("Failed to create a Branch", "error", err)
 		return err
 	}
 
-	log.Printf("✅ Branch created on GitHub: %s", branchName)
+	slog.Info("Branch created on GitHub", "branch", branchName)
 	return nil
 }
 

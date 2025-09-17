@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 
 	"devflow-agent/packages/handlers"
@@ -13,7 +13,7 @@ import (
 func main() {
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found")
+		slog.Error("No .env file found")
 	}
 
 	// Load private key
@@ -21,7 +21,7 @@ func main() {
 
 	// Log app ID
 	appID := os.Getenv("GITHUB_APP_ID")
-	log.Printf("App ID: %s", appID)
+	slog.Info("App ID: ", "appID", appID)
 
 	// Register event handlers
 	probot.HandleEvent("issues", handlers.HandleIssues)
@@ -35,11 +35,11 @@ func loadPrivateKey() {
 	if keyPath != "" {
 		keyData, err := os.ReadFile(keyPath)
 		if err != nil {
-			log.Printf("Failed to read private key: %v", err)
+			slog.Error("Failed to read private key", "error", err)
 		} else {
 			os.Setenv("GITHUB_APP_PRIVATE_KEY", string(keyData))
-			log.Printf("Private key loaded from: %s", keyPath)
-			log.Printf("Private key starts with: %s", string(keyData)[:50])
+			slog.Info("Private key loaded from", "keyPath", keyPath)
+			slog.Info("Private key starts with", "keyData", string(keyData)[:50])
 		}
 	}
 }

@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,29 +12,25 @@ import (
 	"github.com/swinton/go-probot/probot"
 )
 
-func CloneRepositoryTemp(repoName string) (string, func(), error) {
+func CloneRepository(repoName string) (string, error) {
 	cloneURL := fmt.Sprintf("https://github.com/%s.git", repoName)
 	repoDir := fmt.Sprintf("temp_%s_%d", strings.Replace(repoName, "/", "_", -1), time.Now().Unix())
 
-	log.Printf("🔄 Cloning: %s", repoName)
+	slog.Info("Cloning", "repo", repoName)
 
 	cmd := exec.Command("git", "clone", "--depth=1", cloneURL, repoDir)
 	_, err := cmd.CombinedOutput()
 
 	if err != nil {
-		log.Printf("❌ Clone failed: %v", err)
-		return "", nil, err
+		slog.Error("Clone Failed", "error", err)
+		return "", err
 	}
 
-	log.Printf("✅ Repository cloned to: %s", repoDir)
+	slog.Info("Repository cloned to", "repoDir", repoDir)
 
 	// Return cleanup function
-	cleanup := func() {
-		os.RemoveAll(repoDir)
-		log.Printf("🗑️ Cleaned up: %s", repoDir)
-	}
 
-	return repoDir, cleanup, nil
+	return repoDir, nil
 }
 
 func TestProbotAuth(ctx *probot.Context, repoName string) {
@@ -42,15 +38,24 @@ func TestProbotAuth(ctx *probot.Context, repoName string) {
 	owner := parts[0]
 	repo := parts[1]
 
-	log.Printf("🔍 Testing probot authentication...")
+	slog.Info("Testing probot authentication.")
 
 	// Try a simple API call
 	repository, _, err := ctx.GitHub.Repositories.Get(context.Background(), owner, repo)
 	if err != nil {
-		log.Printf("❌ Auth test failed: %v", err)
+		slog.Error("Auth Test Failed", "error", err)
 		return
 	}
 
-	log.Printf("✅ Auth test passed! Repo: %s, Default branch: %s",
+	slog.Info("Auth test passed! Repo: %s, Default branch: %s",
 		repository.GetFullName(), repository.GetDefaultBranch())
+}
+
+func CleanupRepo(repoDir string) error {
+	err := os.RemoveAll(repoDir)
+	if err == nil {
+		slog.Info("Cleaned up", "repoDir", repoDir)
+		return nil
+	}
+	return err
 }
