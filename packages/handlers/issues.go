@@ -1,9 +1,10 @@
 package handlers
 
 import (
-	"devflow-agent/packages/repository"
+	"context"
 	repo "devflow-agent/packages/repository"
-	"log"
+	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/go-github/github"
@@ -20,47 +21,97 @@ func HandleIssues(ctx *probot.Context) error {
 	repoName := event.Repo.GetFullName()
 	action := event.GetAction()
 
-	log.Printf("📝 Issue Action: %s", action)
-	log.Printf("📝 Issue #%d: %s", issueNumber, issueTitle)
-	log.Printf("📝 Repository: %s", repoName)
+	slog.Info(" Issue Action:", "action", action)
+	slog.Info(" Issue", "issueNumber", issueNumber, "issueTitle", issueTitle)
+	slog.Info(" Repository:", "repoName", repoName)
 
-	// Check if issue has required labels before proceeding
+	// Process different actions using switch case
+	switch action {
+	case "opened":
+		return handleIssueOpened(ctx, event, repoName, issueNumber, issueTitle)
+	case "labeled":
+		return handleIssueLabeled(ctx, event, repoName, issueNumber, issueTitle)
+	default:
+		slog.Info("Skipping action", "action", action)
+		return nil
+	}
+}
+
+func handleIssueOpened(ctx *probot.Context, event *github.IssuesEvent, repoName string, issueNumber int, issueTitle string) error {
+	// Check if issue already has required labels
+	if hasRequiredLabels(event.Issue.Labels) {
+		slog.Info(" Issue opened with required labels - proceeding with workflow", "issueNumber", issueNumber)
+		return processIssue(ctx, repoName, issueNumber, issueTitle)
+	}
+
+	slog.Info(" Issue opened without required labels - waiting for labels", "issueNumber", issueNumber)
+	return nil
+}
+
+func handleIssueLabeled(ctx *probot.Context, event *github.IssuesEvent, repoName string, issueNumber int, issueTitle string) error {
+	// Check if the newly labeled issue now has required labels
 	if !hasRequiredLabels(event.Issue.Labels) {
-		log.Printf("⏭️ Skipping issue #%d - missing required labels", issueNumber)
+		slog.Info("Issue labeled but still missing required labels", "issueNumber", issueNumber)
 		return nil
 	}
 
-	log.Printf("✅ Issue #%d has required labels - proceeding with workflow", issueNumber)
+	// Check if we've already processed this issue (deduplication)
+	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, repo.SanitizeBranchName(issueTitle))
+	if branchExists(ctx, repoName, branchName) {
+		slog.Info(" Issue already processed - branch exists", "issueNumber", issueNumber, "branch", branchName)
+		return nil
+	}
 
+	slog.Info("Issue labeled with required labels - proceeding with workflow", "issueNumber", issueNumber)
+	return processIssue(ctx, repoName, issueNumber, issueTitle)
+}
+
+func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
 	// Clone repository temporarily
-	repoPath, cleanup, err := repository.CloneRepositoryTemp(repoName)
+	repoPath, err := repo.CloneRepository(repoName)
 	if err != nil {
-		log.Printf("Failed to clone repository: %v", err)
-		return nil
+		slog.Error("Failed to clone repository", "error", err)
+		return err
 	}
-	defer cleanup()
 
-	log.Printf("📁 Repository ready for analysis at: %s", repoPath)
+	slog.Debug("Repository ready for analysis", "repoPath", repoPath)
 
 	// Test authentication first
 	repo.TestProbotAuth(ctx, repoName)
 
 	// Create branch on GitHub
-	if err := repo.CreateBranchWithProbot(ctx, repoName, issueNumber, issueTitle); err != nil {
-		log.Printf("Failed to create branch: %v", err)
+	if err := repo.CreateBranch(ctx, repoName, issueNumber, issueTitle); err != nil {
+		slog.Error("Failed to create branch", "error", err)
+		return err
+	}
+	if err := repo.CleanupRepo(repoPath); err != nil {
+		slog.Error("Failed to cleanup ", "repoPath", repoPath)
 	}
 
+	slog.Info(" Issue processing completed", "issueNumber", issueNumber)
 	return nil
 }
 
+func branchExists(ctx *probot.Context, repoName, branchName string) bool {
+	parts := strings.Split(repoName, "/")
+	if len(parts) != 2 {
+		slog.Error("Invalid repo name format", "repoName", repoName)
+		return false
+	}
+
+	owner := parts[0]
+	repo := parts[1]
+
+	_, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/"+branchName)
+	return err == nil // If no error, branch exists
+}
+
 // hasRequiredLabels checks if the issue has any of the required labels
-// Changed parameter type from []*github.Label to []github.Label
 func hasRequiredLabels(labels []github.Label) bool {
 	// TODO: Make these dynamic - fetch from config/database/environment
 	requiredLabels := []string{
 		"auto-fix",
 		"devflow-agent-automate",
-		"enhancement",
 		"bug-fix",
 	}
 
@@ -76,17 +127,16 @@ func hasRequiredLabels(labels []github.Label) bool {
 	// Check if any required label exists
 	for _, requiredLabel := range requiredLabels {
 		if issueLabelMap[strings.ToLower(requiredLabel)] {
-			log.Printf("🏷️ Found required label: %s", requiredLabel)
+			slog.Info(" Found required label:", "reqLabel", requiredLabel)
 			return true
 		}
 	}
 
-	log.Printf("🏷️ Required labels not found. Issue has labels: %v", getIssueLabelNames(labels))
+	slog.Info(" Required labels not found. Issue has labels", "labels", getIssueLabelNames(labels))
 	return false
 }
 
 // Helper function to get label names for logging
-// Changed parameter type from []*github.Label to []github.Label
 func getIssueLabelNames(labels []github.Label) []string {
 	var labelNames []string
 	for _, label := range labels {
