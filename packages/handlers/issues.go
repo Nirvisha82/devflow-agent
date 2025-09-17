@@ -79,16 +79,17 @@ func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTi
 	// Test authentication first
 	repo.TestProbotAuth(ctx, repoName)
 
-	// Create branch on GitHub
-	if err := repo.CreateBranch(ctx, repoName, issueNumber, issueTitle); err != nil {
+	err = repo.CreateBranch(ctx, repoName, issueNumber, issueTitle)
+	if err != nil {
 		slog.Error("Failed to create branch", "error", err)
 		return err
 	}
+
 	if err := repo.CleanupRepo(repoPath); err != nil {
-		slog.Error("Failed to cleanup ", "repoPath", repoPath)
+		slog.Error("Failed to cleanup", "repoPath", repoPath, "error", err)
 	}
 
-	slog.Info(" Issue processing completed", "issueNumber", issueNumber)
+	slog.Info("Issue processing completed", "issueNumber", issueNumber)
 	return nil
 }
 
