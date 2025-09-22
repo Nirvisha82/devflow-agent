@@ -4,6 +4,7 @@ go 1.23.3
 
 require (
 	github.com/google/go-github v17.0.0+incompatible
+	github.com/joho/godotenv v1.5.1
 	github.com/swinton/go-probot v1.0.0
 )
 
