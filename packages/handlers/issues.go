@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"context"
-	repo "devflow-agent/packages/repository"
+	repoActions "devflow-agent/packages/repository"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -56,7 +56,7 @@ func handleIssueLabeled(ctx *probot.Context, event *github.IssuesEvent, repoName
 	}
 
 	// Check if we've already processed this issue (deduplication)
-	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, repo.SanitizeBranchName(issueTitle))
+	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, repoActions.SanitizeBranchName(issueTitle))
 	if branchExists(ctx, repoName, branchName) {
 		slog.Info(" Issue already processed - branch exists", "issueNumber", issueNumber, "branch", branchName)
 		return nil
@@ -68,7 +68,7 @@ func handleIssueLabeled(ctx *probot.Context, event *github.IssuesEvent, repoName
 
 func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
 	// Clone repository temporarily
-	repoPath, err := repo.CloneRepository(repoName)
+	repoPath, err := repoActions.CloneRepository(repoName)
 	if err != nil {
 		slog.Error("Failed to clone repository", "error", err)
 		return err
@@ -77,15 +77,15 @@ func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTi
 	slog.Debug("Repository ready for analysis", "repoPath", repoPath)
 
 	// Test authentication first
-	repo.TestProbotAuth(ctx, repoName)
+	repoActions.TestProbotAuth(ctx, repoName)
 
-	err = repo.CreateBranch(ctx, repoName, issueNumber, issueTitle)
+	err = repoActions.CreateBranch(ctx, repoName, issueNumber, issueTitle)
 	if err != nil {
 		slog.Error("Failed to create branch", "error", err)
 		return err
 	}
 
-	if err := repo.CleanupRepo(repoPath); err != nil {
+	if err := repoActions.CleanupRepo(repoPath); err != nil {
 		slog.Error("Failed to cleanup", "repoPath", repoPath, "error", err)
 	}
 

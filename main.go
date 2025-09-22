@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
+	"strings"
 
 	"devflow-agent/packages/handlers"
 
@@ -11,6 +13,13 @@ import (
 )
 
 func main() {
+	// Configure logging to reduce verbosity
+	baseHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})
+	filteredHandler := &FilteredHandler{handler: baseHandler}
+	slog.SetDefault(slog.New(filteredHandler))
+
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
 		slog.Error("No .env file found")
@@ -25,6 +34,7 @@ func main() {
 
 	// Register event handlers
 	probot.HandleEvent("issues", handlers.HandleIssues)
+	probot.HandleEvent("installation_repositories", handlers.HandleInstallations)
 
 	// Start the bot
 	probot.Start()
@@ -42,4 +52,28 @@ func loadPrivateKey() {
 			slog.Info("Private key starts with", "keyData", string(keyData)[:50])
 		}
 	}
+}
+
+type FilteredHandler struct {
+	handler slog.Handler
+}
+
+func (h *FilteredHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Only filter out headers
+	if strings.Contains(r.Message, "Headers:") {
+		return nil
+	}
+	return h.handler.Handle(ctx, r)
+}
+
+func (h *FilteredHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.handler.Enabled(ctx, level)
+}
+
+func (h *FilteredHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &FilteredHandler{handler: h.handler.WithAttrs(attrs)}
+}
+
+func (h *FilteredHandler) WithGroup(name string) slog.Handler {
+	return &FilteredHandler{handler: h.handler.WithGroup(name)}
 }
