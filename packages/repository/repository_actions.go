@@ -119,3 +119,13 @@ func CleanupRepo(repoDir string) error {
 	}
 	return err
 }
+
+func SaveAnalysisToFile(content, filePath string) error {
+	err := os.WriteFile(filePath, []byte(content), 0644)
+	if err != nil {
+		slog.Error("Failed to save analysis file", "error", err)
+		return err
+	}
+	slog.Info("Analysis saved successfully", "file", filePath)
+	return nil
+}
