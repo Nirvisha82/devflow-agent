@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	repoActions "devflow-agent/packages/repository"
+	"devflow-agent/types"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,7 +29,9 @@ func HandleIssues(ctx *probot.Context) error {
 	// Process different actions using switch case
 	switch action {
 	case "opened":
-		return handleIssueOpened(ctx, event, repoName, issueNumber, issueTitle)
+		slog.Info("Issue opened - will process when labeled", "issueNumber", issueNumber)
+		return nil
+		// return handleIssueOpened(ctx, event, repoName, issueNumber, issueTitle)
 	case "labeled":
 		return handleIssueLabeled(ctx, event, repoName, issueNumber, issueTitle)
 	default:
@@ -40,7 +43,13 @@ func HandleIssues(ctx *probot.Context) error {
 func handleIssueOpened(ctx *probot.Context, event *github.IssuesEvent, repoName string, issueNumber int, issueTitle string) error {
 	// Check if issue already has required labels
 	if hasRequiredLabels(event.Issue.Labels) {
-		slog.Info(" Issue opened with required labels - proceeding with workflow", "issueNumber", issueNumber)
+		branchName := fmt.Sprintf("issue-%d-%s", issueNumber, repoActions.SanitizeBranchName(issueTitle))
+		if branchExists(ctx, repoName, branchName) {
+			slog.Info("Issue already processed - branch exists", "issueNumber", issueNumber, "branch", branchName)
+			return nil
+		}
+
+		slog.Info("Issue opened with required labels - proceeding with workflow", "issueNumber", issueNumber)
 		return processIssue(ctx, repoName, issueNumber, issueTitle)
 	}
 
@@ -67,21 +76,45 @@ func handleIssueLabeled(ctx *probot.Context, event *github.IssuesEvent, repoName
 }
 
 func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
+	// StandardVariables
+	IssueProcessing := &types.IssueProcessing{
+		IssueTitle:   issueTitle,
+		RepoName:     repoName,
+		BranchName:   fmt.Sprintf("issue-%d-%s", issueNumber, repoActions.SanitizeBranchName(issueTitle)),
+		AnalysisFile: "/devflow-repo-structure.md",
+	}
+	var commitMessage = "Repository analysis file by devflow-agent"
+
 	// Clone repository temporarily
-	repoPath, err := repoActions.CloneRepository(repoName)
+	repoPath, repoURL, err := repoActions.CloneRepository(repoName)
 	if err != nil {
 		slog.Error("Failed to clone repository", "error", err)
 		return err
 	}
 
 	slog.Debug("Repository ready for analysis", "repoPath", repoPath)
+	var analysisFileName = repoPath + IssueProcessing.AnalysisFile
+	err = repoActions.AnalyzeRepo(ctx, analysisFileName, repoPath, repoURL)
+
+	if err != nil {
+		slog.Error("Failed to analyze repository", "error", err)
+		return err
+	}
 
 	// Test authentication first
 	repoActions.TestProbotAuth(ctx, repoName)
-
-	err = repoActions.CreateBranch(ctx, repoName, issueNumber, issueTitle)
+	err = repoActions.CreateBranch(ctx, IssueProcessing.RepoName, IssueProcessing.BranchName)
 	if err != nil {
 		slog.Error("Failed to create branch", "error", err)
+		if err := repoActions.CleanupRepo(repoPath); err != nil {
+			slog.Error("Failed to cleanup", "repoPath", repoPath, "error", err)
+		}
+		return err
+	}
+
+	err = repoActions.CommitFile(ctx, repoName, IssueProcessing.BranchName, commitMessage, analysisFileName)
+	if err != nil {
+		slog.Error("Failed to commit analysis file", "error", err)
 		return err
 	}
 

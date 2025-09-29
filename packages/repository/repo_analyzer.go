@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/swinton/go-probot/probot"
 )
 
 type FileInfo struct {
@@ -32,29 +30,12 @@ type RepoAnalyzer struct {
 	gitignorePatterns []string
 }
 
-func AnalyzeRepo(ctx *probot.Context, repoURL string, outputFile string) {
-
-	fmt.Printf("Creating analysis of: %s\n", repoURL)
-
-	analyzer := &RepoAnalyzer{
-		RepoURL:    repoURL,
-		OutputFile: outputFile,
-		Files:      make([]FileInfo, 0),
-	}
-
-	if err := analyzer.Generate(); err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("Repository analysis saved to: %s\n", outputFile)
-}
-
 func (r *RepoAnalyzer) Generate() error {
-	fmt.Println("Cloning repository...")
-	if err := r.cloneRepo(); err != nil {
-		return fmt.Errorf("failed to clone repo: %w", err)
-	}
-	defer r.cleanup()
+	// fmt.Println("Cloning repository...")
+	// if err := r.cloneRepo(); err != nil {
+	// 	return fmt.Errorf("failed to clone repo: %w", err)
+	// }
+	// defer r.cleanup()
 
 	fmt.Println("Analyzing files...")
 	if err := r.analyzeFiles(); err != nil {

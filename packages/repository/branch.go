@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strings"
 
@@ -10,7 +9,7 @@ import (
 	"github.com/swinton/go-probot/probot"
 )
 
-func CreateBranch(ctx *probot.Context, repoName string, issueNumber int, issueTitle string) error {
+func CreateBranch(ctx *probot.Context, repoName, branchName string) error {
 
 	// Split repo name
 	parts := strings.Split(repoName, "/")
@@ -24,7 +23,6 @@ func CreateBranch(ctx *probot.Context, repoName string, issueNumber int, issueTi
 		return err
 	}
 
-	branchName := fmt.Sprintf("issue-%d-%s", issueNumber, SanitizeBranchName(issueTitle))
 	slog.Info("Creating branch on GitHub", "branch", branchName)
 	// Create new branch reference
 	newRef := &github.Reference{
