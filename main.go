@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"devflow-agent/packages/config"
 	"devflow-agent/packages/handlers"
 
 	"github.com/joho/godotenv"
@@ -24,6 +25,14 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		slog.Error("No .env file found")
 	}
+
+	// Load configuration
+	_, err := config.LoadConfig("")
+	if err != nil {
+		slog.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Configuration loaded successfully")
 
 	// Load private key
 	loadPrivateKey()

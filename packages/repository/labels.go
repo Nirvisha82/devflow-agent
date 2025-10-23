@@ -2,29 +2,32 @@ package repository
 
 import (
 	"context"
+	"devflow-agent/packages/config"
 	"log/slog"
 
 	"github.com/google/go-github/github"
 	"github.com/swinton/go-probot/probot"
 )
 
-// Define your custom labels
-var customLabels = []*github.Label{
-	{
-		Name:        github.String("devflow-agent-automate"),
-		Color:       github.String("d73a4a"),
-		Description: github.String("NewBranch-Analysis-Suggestions-PR"),
-	},
-	{
-		Name:        github.String("devflow-agent-bug-fix"),
-		Color:       github.String("a2eeef"),
-		Description: github.String("NewBranch-Analysis-Action-PR"),
-	},
-	// more labels as needed
+// getCustomLabels returns labels from configuration
+func getCustomLabels() []*github.Label {
+	cfg := config.GetConfig()
+	labels := make([]*github.Label, len(cfg.Labels))
+
+	for i, labelConfig := range cfg.Labels {
+		labels[i] = &github.Label{
+			Name:        github.String(labelConfig.Name),
+			Color:       github.String(labelConfig.Color),
+			Description: github.String(labelConfig.Description),
+		}
+	}
+
+	return labels
 }
 
 func AddCustomLabels(ctx *probot.Context, owner, repo string) error {
 	client := ctx.GitHub
+	customLabels := getCustomLabels()
 
 	for _, label := range customLabels {
 		// Check if label exists, create if it doesn't
@@ -47,6 +50,7 @@ func AddCustomLabels(ctx *probot.Context, owner, repo string) error {
 
 func RemoveCustomLabels(ctx *probot.Context, owner, repo string) error {
 	client := ctx.GitHub
+	customLabels := getCustomLabels()
 
 	for _, label := range customLabels {
 		labelName := label.GetName()

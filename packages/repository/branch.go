@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"devflow-agent/packages/config"
 	"log/slog"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 )
 
 func CreateBranch(ctx *probot.Context, repoName, branchName string) error {
+	cfg := config.GetConfig()
 
 	// Split repo name
 	parts := strings.Split(repoName, "/")
@@ -17,7 +19,7 @@ func CreateBranch(ctx *probot.Context, repoName, branchName string) error {
 	repo := parts[1]
 
 	// Get main branch reference
-	mainRef, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/main")
+	mainRef, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/"+cfg.Repository.DefaultBranch)
 	if err != nil {
 		slog.Error("Clone Failed", "error", err)
 		return err
@@ -43,10 +45,11 @@ func CreateBranch(ctx *probot.Context, repoName, branchName string) error {
 }
 
 func SanitizeBranchName(title string) string {
+	cfg := config.GetConfig()
 	sanitized := strings.ReplaceAll(title, " ", "-")
 	sanitized = strings.ToLower(sanitized)
-	if len(sanitized) > 20 {
-		sanitized = sanitized[:20]
+	if len(sanitized) > cfg.Issues.BranchNameMaxLength {
+		sanitized = sanitized[:cfg.Issues.BranchNameMaxLength]
 	}
 	return sanitized
 }
