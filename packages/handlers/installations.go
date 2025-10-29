@@ -181,7 +181,7 @@ func initializeDevflowKnowledgeBase(ctx *probot.Context, repoName string) error 
 	}
 
 	// Commit all files in a single commit
-	if err := repoActions.CommitMultipleFiles(ctx, repoName, branchName, cfg.Installations.KnowledgeBaseCommit, devflowFiles); err != nil {
+	if err := repoActions.CommitMultipleFiles(ctx, repoName, branchName, cfg.Installations.KnowledgeBaseCommit, devflowFiles, true, ""); err != nil {
 		slog.Error("Failed to commit Devflow files", "error", err)
 		return err
 	}

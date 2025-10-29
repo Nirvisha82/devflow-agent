@@ -289,10 +289,10 @@ func (s *SupervisorAgent) createBranchAndCommit(modifiedFiles []string, changesS
 	}
 
 	// Commit message
-	commitMessage := fmt.Sprintf("Resolve issue #%d: %s\n\n%s", s.issueNumber, s.issueTitle, changesSummary)
+	commitMessage := fmt.Sprintf("Resolution issue #%d: %s\n\n%s", s.issueNumber, s.issueTitle, changesSummary)
 
 	// Commit all modified files
-	err = repoActions.CommitMultipleFiles(s.ctx, s.repoName, s.branchName, commitMessage, modifiedFiles)
+	err = repoActions.CommitMultipleFiles(s.ctx, s.repoName, s.branchName, commitMessage, modifiedFiles, false, s.repoPath)
 	if err != nil {
 		return fmt.Errorf("failed to commit files: %w", err)
 	}

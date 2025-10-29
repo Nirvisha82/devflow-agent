@@ -133,7 +133,8 @@ Respond in JSON format:
   "reasoning": "Explanation of why these files were selected"
 }
 
-Be specific with file paths. Only include files that actually need modification.`,
+Be specific with file paths. Only include files that actually need modification.
+Do NOT use markdown formatting in file paths. Return ONLY JSON with no code blocks or backticks.`,
 		f.issueTitle,
 		f.issueBody,
 		strings.Join(f.labels, ", "),
@@ -252,29 +253,46 @@ func (f *FileAnalyzerAgent) expandWithDependencies(filePaths []string, depGraph 
 
 // Helper function to extract file paths from text
 func extractFilesFromText(text string) []string {
-	var files []string
+	fileSet := make(map[string]bool)
+
 	lines := strings.Split(text, "\n")
 
 	for _, line := range lines {
-		// Look for file paths (containing / and file extensions)
-		if strings.Contains(line, "/") && strings.Contains(line, ".") {
-			// Extract path
-			parts := strings.Fields(line)
-			for _, part := range parts {
-				if strings.Contains(part, "/") && strings.Contains(part, ".") {
-					// Clean up quotes and punctuation
-					part = strings.Trim(part, `"',.;:[]{}()`)
-					files = append(files, part)
-				}
+		if !strings.Contains(line, "/") || !strings.Contains(line, ".") {
+			continue
+		}
+
+		// Remove markdown formatting first
+		line = strings.ReplaceAll(line, "**", "")
+		line = strings.ReplaceAll(line, "__", "")
+		line = strings.ReplaceAll(line, "*", "")
+		line = strings.ReplaceAll(line, "_", "")
+
+		parts := strings.Fields(line)
+		for _, part := range parts {
+			// Clean up the part
+			part = strings.Trim(part, `"',.;:[]{}()*`+"`")
+			part = strings.TrimPrefix(part, "->")
+			part = strings.TrimPrefix(part, "=>")
+
+			// Check if it looks like a valid file path
+			if strings.Contains(part, "/") && strings.Contains(part, ".") &&
+				!strings.ContainsAny(part, "*`_[]{}()\"'") {
+				fileSet[part] = true
 			}
 		}
 	}
 
-	// If no files found, return some defaults
-	if len(files) == 0 {
-		slog.Warn("FileAnalyzer: No files extracted from AI response, using defaults")
-		files = []string{"main.go", "packages/handlers/issues.go"}
+	// Convert back to slice
+	result := make([]string, 0, len(fileSet))
+	for file := range fileSet {
+		result = append(result, file)
 	}
 
-	return files
+	if len(result) == 0 {
+		slog.Warn("FileAnalyzer: No files extracted from AI response, using defaults")
+		result = []string{"main.go", "packages/handlers/issues.go"}
+	}
+
+	return result
 }

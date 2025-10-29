@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"devflow-agent/packages/config"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -95,8 +96,12 @@ func CommitFile(ctx *probot.Context, repoName, branchName, commitMessage, filePa
 	return nil
 }
 
-func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessage string, filePaths []string) error {
+func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessage string, filePaths []string, init bool, repoPath string) error {
 	parts := strings.Split(repoName, "/")
+	if len(parts) != 2 {
+		slog.Error("Invalid repository name format", "repoName", repoName)
+		return errors.New("invalid repository name format, expected 'owner/repo'")
+	}
 	owner := parts[0]
 	repo := parts[1]
 
@@ -105,14 +110,14 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 	// Get the current commit SHA for the branch
 	ref, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/"+branchName)
 	if err != nil {
-		slog.Error("Failed to get branch reference", "error", err)
+		slog.Error("Failed to get branch reference", "error", err, "branch", branchName)
 		return err
 	}
 
 	// Get the tree SHA from the current commit
 	commit, _, err := ctx.GitHub.Git.GetCommit(context.Background(), owner, repo, ref.Object.GetSHA())
 	if err != nil {
-		slog.Error("Failed to get commit", "error", err)
+		slog.Error("Failed to get commit", "error", err, "sha", ref.Object.GetSHA())
 		return err
 	}
 
@@ -122,36 +127,49 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 		// Read file content
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			slog.Error("Failed to read file", "file", filePath, "error", err)
+			slog.Error("Failed to read file locally", "file", filePath, "error", err)
 			return err
 		}
 
 		// Get relative path within the repo (remove the temp repo path prefix)
-		fileName := filepath.Base(filePath)
-		// For .devflow files, we want them in the .devflow directory
-		repoFilePath := ".devflow/" + fileName
+		repoFilePath, err := filepath.Rel(repoPath, filePath)
+		if err != nil {
+			return fmt.Errorf("failed to calculate relative path for %s using root %s: %w", filePath, repoPath, err)
+		}
+
+		if init {
+			fileName := filepath.Base(filePath)
+			repoFilePath = ".devflow/" + fileName
+		}
+
+		// Convert content to string pointer for github.Blob
+		contentStr := string(content)
 
 		// Create blob
 		blob := &github.Blob{
-			Content:  github.String(string(content)),
+			Content:  &contentStr,
 			Encoding: github.String("utf-8"),
 		}
 
 		createdBlob, _, err := ctx.GitHub.Git.CreateBlob(context.Background(), owner, repo, blob)
 		if err != nil {
-			slog.Error("Failed to create blob", "file", fileName, "error", err)
+			// BUG FIX 2: Use the correctly scoped 'repoFilePath' for logging
+			slog.Error("Failed to create blob for content", "repoPath", repoFilePath, "error", err)
 			return err
 		}
 
 		// Create tree entry
 		entry := &github.TreeEntry{
 			Path: github.String(repoFilePath),
-			Mode: github.String("100644"),
+			Mode: github.String("100644"), // Standard file mode
 			Type: github.String("blob"),
 			SHA:  createdBlob.SHA,
 		}
 		entries = append(entries, entry)
 	}
+
+	// The original code was unnecessarily converting []*github.TreeEntry to []github.TreeEntry
+	// for the next call. The go-github library accepts the pointer slice directly.
 
 	// Create new tree
 	treeEntries := make([]github.TreeEntry, len(entries))
