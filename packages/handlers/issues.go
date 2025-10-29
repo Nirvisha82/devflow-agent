@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"context"
-	"devflow-agent/packages/ai"
+	"devflow-agent/packages/agents"
 	"devflow-agent/packages/config"
 	repoActions "devflow-agent/packages/repository"
 	"fmt"
@@ -84,139 +84,72 @@ func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTi
 	event := ctx.Payload.(*github.IssuesEvent)
 	branchName := fmt.Sprintf("%s%d-%s", cfg.Issues.BranchPrefix, issueNumber, repoActions.SanitizeBranchName(issueTitle))
 
-	slog.Info("Starting three-agent workflow", "issueNumber", issueNumber, "branch", branchName)
+	slog.Info("Starting multi-agent workflow", "issueNumber", issueNumber, "branch", branchName)
 
-	// Clone repository temporarily
+	// Clone repository
 	repoPath, _, err := repoActions.CloneRepository(repoName)
 	if err != nil {
 		slog.Error("Failed to clone repository", "error", err)
 		return err
 	}
-	// defer func() {
-	// 	if cleanupErr := repoActions.CleanupRepo(repoPath); cleanupErr != nil {
-	// 		slog.Error("Failed to cleanup", "repoPath", repoPath, "error", cleanupErr)
-	// 	}
-	// }()
 
-	// Check if Devflow knowledge base exists
+	// Check if knowledge base exists
 	repoStructureFile := cfg.GetDevflowPath(repoPath, cfg.Files.StructureFile)
-	_dependecygraph := cfg.GetDevflowPath(repoPath, cfg.Files.DependencyFile)
-	slog.Debug(_dependecygraph)
-
-	// If knowledge base doesn't exist, create it first
 	if _, err := os.Stat(repoStructureFile); os.IsNotExist(err) {
 		slog.Info("Devflow knowledge base not found, creating it first")
 		if err := initializeDevflowKnowledgeBaseFromIssues(ctx, repoName); err != nil {
 			slog.Error("Failed to initialize knowledge base", "error", err)
 			return err
 		}
-		// Re-clone to get the updated knowledge base
+
+		// Re-clone to get updated knowledge base
 		if cleanupErr := repoActions.CleanupRepo(repoPath); cleanupErr != nil {
 			slog.Error("Failed to cleanup after knowledge base creation", "error", cleanupErr)
 		}
-		_, _, err = repoActions.CloneRepository(repoName)
+		repoPath, _, err = repoActions.CloneRepository(repoName)
 		if err != nil {
 			slog.Error("Failed to re-clone repository", "error", err)
 			return err
 		}
 	}
 
-	// Agent A: File Selector/Planner
-	slog.Info("Running Agent A: File Selector/Planner")
-	agentA := &ai.AgentA{
-		IssueTitle:       issueTitle,
-		IssueDescription: event.Issue.GetBody(),
-		Labels:           getIssueLabelNames(event.Issue.Labels),
-		RepoAnalysisFile: repoStructureFile,
-	}
+	// Create and execute Supervisor Agent
+	supervisor := agents.NewSupervisorAgent(
+		ctx,
+		repoPath,
+		repoName,
+		issueNumber,
+		issueTitle,
+		event.Issue.GetBody(),
+		branchName,
+		getIssueLabelNames(event.Issue.Labels),
+	)
 
-	agentAResult, err := ai.AnalyzeIssueWithAgentA(agentA)
+	result, err := supervisor.Execute()
 	if err != nil {
-		slog.Error("Agent A failed", "error", err)
+		slog.Error("Supervisor workflow failed", "error", err)
 		return err
 	}
 
-	slog.Info("Agent A completed", "relevantFiles", agentAResult.RelevantFiles, "plan", agentAResult.Plan)
+	if !result.Success {
+		slog.Error("Workflow completed with errors", "error", result.Error)
+		return result.Error
+	}
 
-	// // Agent B: Code Analyzer/Suggester
-	// slog.Info("Running Agent B: Code Analyzer/Suggester")
-	// agentB := &ai.AgentB{
-	// 	AgentAResult:     agentAResult,
-	// 	IssueTitle:       issueTitle,
-	// 	IssueDescription: event.Issue.GetBody(),
-	// 	RepoPath:         repoPath,
-	// 	DependencyGraph:  dependencyGraphFile,
-	// }
+	// Cleanup
+	if cfg.Repository.CleanupTempRepos {
+		if cleanupErr := repoActions.CleanupRepo(repoPath); cleanupErr != nil {
+			slog.Error("Failed to cleanup temporary repository", "error", cleanupErr)
+		} else {
+			slog.Info("Temporary repository cleaned up", "repoPath", repoPath)
+		}
+	}
 
-	// agentBResult, err := ai.AnalyzeWithAgentB(agentB)
-	// if err != nil {
-	// 	slog.Error("Agent B failed", "error", err)
-	// 	return err
-	// }
-
-	// slog.Info("Agent B completed", "suggestions", len(agentBResult.CodeSuggestions))
-
-	// // Agent C: Code Generator/Implementer
-	// slog.Info("Running Agent C: Code Generator/Implementer")
-	// agentC := &ai.AgentC{
-	// 	AgentBResult:     agentBResult,
-	// 	IssueTitle:       issueTitle,
-	// 	IssueDescription: event.Issue.GetBody(),
-	// 	RepoPath:         repoPath,
-	// 	BranchName:       branchName,
-	// }
-
-	// agentCResult, err := ai.ImplementWithAgentC(agentC)
-	// if err != nil {
-	// 	slog.Error("Agent C failed", "error", err)
-	// 	return err
-	// }
-
-	// if !agentCResult.Success {
-	// 	slog.Error("Agent C implementation failed", "error", agentCResult.Error)
-	// 	return fmt.Errorf("implementation failed: %s", agentCResult.Error)
-	// }
-
-	// slog.Info("Agent C completed", "modifiedFiles", agentCResult.ModifiedFiles)
-
-	// Create branch and commit changes
-	// err = repoActions.CreateBranch(ctx, repoName, branchName)
-	// if err != nil {
-	// 	slog.Error("Failed to create branch", "error", err)
-	// 	return err
-	// }
-
-	// // Commit all modified files
-	// for _, file := range agentCResult.ModifiedFiles {
-	// 	fullPath := repoPath + "/" + file
-	// 	err = repoActions.CommitFile(ctx, repoName, branchName, agentCResult.CommitMessage, fullPath)
-	// 	if err != nil {
-	// 		slog.Error("Failed to commit file", "file", file, "error", err)
-	// 		return err
-	// 	}
-	// }
-
-	// // Create summary document
-	// summaryFile := repoPath + "/devflow-implementation-summary.md"
-	// err = repoActions.SaveAnalysisToFile(agentCResult.Summary, summaryFile)
-	// if err != nil {
-	// 	slog.Error("Failed to save implementation summary", "error", err)
-	// 	return err
-	// }
-
-	// // Commit summary
-	// err = repoActions.CommitFile(ctx, repoName, branchName, "Add implementation summary", summaryFile)
-	// if err != nil {
-	// 	slog.Error("Failed to commit summary", "error", err)
-	// 	return err
-	// }
-
-	// TODO: Create Pull Request
-	// This would require additional GitHub API calls to create a PR
-	// slog.Info("Three-agent workflow completed successfully",
-	// 	"issueNumber", issueNumber,
-	// 	"branch", branchName,
-	// 	"modifiedFiles", len(agentCResult.ModifiedFiles))
+	slog.Info("Multi-agent workflow completed successfully",
+		"issueNumber", issueNumber,
+		"branch", branchName,
+		"prNumber", result.PRNumber,
+		"modifiedFiles", len(result.ModifiedFiles))
 
 	return nil
 }
