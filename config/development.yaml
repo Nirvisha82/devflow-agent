@@ -1,0 +1,55 @@
+installations:
+  init_branch: devflow-init
+  init_commit: devflow repo setup
+  knowledge_base_branch: devflow-init
+  knowledge_base_commit: initialize devflow files
+
+issues:
+  required_labels:
+    - devflow-agent-automate
+  branch_prefix: issue-
+  branch_name_max_length: 20
+
+labels:
+  - name: devflow-agent-automate
+    color: d73a4a
+    description: NewBranch-Analysis-Suggestions-PR
+  - name: devflow-agent-bug-fix
+    color: a2eeef
+    description: NewBranch-Analysis-Action-PR
+
+ai:
+  model: gemini-2.5-flash
+  temperature: 0.7
+  top_k: 40
+  top_p: 0.95
+  max_output_tokens: 8192
+  repo_analysis_temperature: 0.3
+
+repository:
+  clone_depth: 1
+  default_branch: main
+  devflow_directory: .devflow
+  temp_repo_prefix: temp_repo_
+  cleanup_temp_repos: true
+
+debug:
+  enabled: false
+  create_debug_files: false
+
+pull_requests:
+  installation:
+    title_file: config/templates/installation_pr_title.txt
+    body_file: config/templates/installation_pr_body.md
+  issue_resolution:
+    title_file: config/templates/issue_resolution_pr_title.txt
+    body_file: config/templates/issue_resolution_pr_body.md
+
+files:
+  structure_file: repo-structure.md
+  analysis_file: repo-analysis.md
+  analysis_prompt_file: repo-analysis-prompt.md
+  metadata_file: file-metadata.json
+  dependency_file: dependency-graph.json
+  readme_file: README.md
+  summary_file: devflow-implementation-summary.md

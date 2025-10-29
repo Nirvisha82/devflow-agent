@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"devflow-agent/packages/config"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,12 +16,13 @@ import (
 )
 
 func CloneRepository(repoName string) (string, string, error) {
+	cfg := config.GetConfig()
 	cloneURL := fmt.Sprintf("https://github.com/%s.git", repoName)
-	repoDir := fmt.Sprintf("temp_repo_%s_%d", strings.Replace(repoName, "/", "_", -1), time.Now().Unix())
+	repoDir := fmt.Sprintf("%s%s_%d", cfg.Repository.TempRepoPrefix, strings.Replace(repoName, "/", "_", -1), time.Now().Unix())
 
 	slog.Info("Cloning", "repo", repoName)
 
-	cmd := exec.Command("git", "clone", "--depth=1", cloneURL, repoDir)
+	cmd := exec.Command("git", "clone", fmt.Sprintf("--depth=%d", cfg.Repository.CloneDepth), cloneURL, repoDir)
 	_, err := cmd.CombinedOutput()
 
 	if err != nil {
@@ -91,6 +93,195 @@ func CommitFile(ctx *probot.Context, repoName, branchName, commitMessage, filePa
 
 	slog.Info("Analysis file committed to branch", "branch", branchName, "file", fileName)
 	return nil
+}
+
+func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessage string, filePaths []string) error {
+	parts := strings.Split(repoName, "/")
+	owner := parts[0]
+	repo := parts[1]
+
+	slog.Info("Committing multiple files to branch", "branch", branchName, "fileCount", len(filePaths))
+
+	// Get the current commit SHA for the branch
+	ref, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/"+branchName)
+	if err != nil {
+		slog.Error("Failed to get branch reference", "error", err)
+		return err
+	}
+
+	// Get the tree SHA from the current commit
+	commit, _, err := ctx.GitHub.Git.GetCommit(context.Background(), owner, repo, ref.Object.GetSHA())
+	if err != nil {
+		slog.Error("Failed to get commit", "error", err)
+		return err
+	}
+
+	// Create tree entries for all files
+	var entries []*github.TreeEntry
+	for _, filePath := range filePaths {
+		// Read file content
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			slog.Error("Failed to read file", "file", filePath, "error", err)
+			return err
+		}
+
+		// Get relative path within the repo (remove the temp repo path prefix)
+		fileName := filepath.Base(filePath)
+		// For .devflow files, we want them in the .devflow directory
+		repoFilePath := ".devflow/" + fileName
+
+		// Create blob
+		blob := &github.Blob{
+			Content:  github.String(string(content)),
+			Encoding: github.String("utf-8"),
+		}
+
+		createdBlob, _, err := ctx.GitHub.Git.CreateBlob(context.Background(), owner, repo, blob)
+		if err != nil {
+			slog.Error("Failed to create blob", "file", fileName, "error", err)
+			return err
+		}
+
+		// Create tree entry
+		entry := &github.TreeEntry{
+			Path: github.String(repoFilePath),
+			Mode: github.String("100644"),
+			Type: github.String("blob"),
+			SHA:  createdBlob.SHA,
+		}
+		entries = append(entries, entry)
+	}
+
+	// Create new tree
+	treeEntries := make([]github.TreeEntry, len(entries))
+	for i, entry := range entries {
+		treeEntries[i] = *entry
+	}
+
+	newTree, _, err := ctx.GitHub.Git.CreateTree(context.Background(), owner, repo, commit.Tree.GetSHA(), treeEntries)
+	if err != nil {
+		slog.Error("Failed to create tree", "error", err)
+		return err
+	}
+
+	// Create new commit
+	newCommit := &github.Commit{
+		Message: github.String(commitMessage),
+		Tree:    newTree,
+		Parents: []github.Commit{*commit},
+	}
+
+	createdCommit, _, err := ctx.GitHub.Git.CreateCommit(context.Background(), owner, repo, newCommit)
+	if err != nil {
+		slog.Error("Failed to create commit", "error", err)
+		return err
+	}
+
+	// Update branch reference
+	ref.Object.SHA = createdCommit.SHA
+	_, _, err = ctx.GitHub.Git.UpdateRef(context.Background(), owner, repo, ref, false)
+	if err != nil {
+		slog.Error("Failed to update branch reference", "error", err)
+		return err
+	}
+
+	slog.Info("Successfully committed multiple files", "branch", branchName, "fileCount", len(filePaths), "commit", createdCommit.GetSHA())
+	return nil
+}
+
+// CreatePullRequest creates a pull request from the specified branch to the default branch
+func CreatePullRequest(ctx *probot.Context, repoName, branchName, title, body string) (*github.PullRequest, error) {
+	cfg := config.GetConfig()
+	parts := strings.Split(repoName, "/")
+	owner := parts[0]
+	repo := parts[1]
+
+	slog.Info("Creating pull request", "repo", repoName, "branch", branchName, "title", title)
+
+	// Create the pull request
+	newPR := &github.NewPullRequest{
+		Title:               github.String(title),
+		Head:                github.String(branchName),
+		Base:                github.String(cfg.Repository.DefaultBranch),
+		Body:                github.String(body),
+		MaintainerCanModify: github.Bool(true),
+	}
+
+	pr, _, err := ctx.GitHub.PullRequests.Create(context.Background(), owner, repo, newPR)
+	if err != nil {
+		slog.Error("Failed to create pull request", "error", err)
+		return nil, err
+	}
+
+	slog.Info("Pull request created successfully",
+		"prNumber", pr.GetNumber(),
+		"prURL", pr.GetHTMLURL(),
+		"branch", branchName)
+
+	return pr, nil
+}
+
+// CreateInstallationPR creates a PR for the installation workflow
+func CreateInstallationPR(ctx *probot.Context, repoName, branchName string) (*github.PullRequest, error) {
+	cfg := config.GetConfig()
+
+	// Read title from file
+	titleBytes, err := os.ReadFile(cfg.PullRequests.Installation.TitleFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PR title template: %w", err)
+	}
+	title := strings.TrimSpace(string(titleBytes))
+
+	// Read body from file
+	bodyBytes, err := os.ReadFile(cfg.PullRequests.Installation.BodyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PR body template: %w", err)
+	}
+	body := string(bodyBytes)
+
+	return CreatePullRequest(ctx, repoName, branchName, title, body)
+}
+
+// CreateIssueResolutionPR creates a PR for issue resolution workflow
+func CreateIssueResolutionPR(ctx *probot.Context, repoName, branchName string, issueNumber int, issueTitle, changesSummary, implementationDetails, testingNotes string) (*github.PullRequest, error) {
+	cfg := config.GetConfig()
+
+	// Read title template from file
+	titleBytes, err := os.ReadFile(cfg.PullRequests.IssueResolution.TitleFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PR title template: %w", err)
+	}
+	title := strings.TrimSpace(string(titleBytes))
+
+	// Read body template from file
+	bodyBytes, err := os.ReadFile(cfg.PullRequests.IssueResolution.BodyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PR body template: %w", err)
+	}
+	body := string(bodyBytes)
+
+	// Replace template variables in title
+	title = strings.ReplaceAll(title, "{issue_number}", fmt.Sprintf("%d", issueNumber))
+	title = strings.ReplaceAll(title, "{issue_title}", issueTitle)
+
+	// Replace template variables in body
+	body = strings.ReplaceAll(body, "{issue_number}", fmt.Sprintf("%d", issueNumber))
+	body = strings.ReplaceAll(body, "{issue_title}", issueTitle)
+	body = strings.ReplaceAll(body, "{changes_summary}", changesSummary)
+	body = strings.ReplaceAll(body, "{implementation_details}", implementationDetails)
+	body = strings.ReplaceAll(body, "{testing_notes}", testingNotes)
+
+	return CreatePullRequest(ctx, repoName, branchName, title, body)
+}
+
+// CreateIssueResolutionPRSimple creates a PR for issue resolution with minimal info (for current workflow)
+func CreateIssueResolutionPRSimple(ctx *probot.Context, repoName, branchName string, issueNumber int, issueTitle string) (*github.PullRequest, error) {
+	changesSummary := "Knowledge base initialization and analysis files"
+	implementationDetails := "Generated comprehensive repository analysis and knowledge base files"
+	testingNotes := "Auto-generated files - no manual testing required"
+
+	return CreateIssueResolutionPR(ctx, repoName, branchName, issueNumber, issueTitle, changesSummary, implementationDetails, testingNotes)
 }
 
 func TestProbotAuth(ctx *probot.Context, repoName string) {
