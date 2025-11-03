@@ -87,24 +87,42 @@ async def suggest_changes(request: ProcessIssueRequest):
     Analyze an issue and provide code change suggestions without modifying files.
     """
     try:
+        # Convert to absolute path
+        repo_path = request.repo_path
+        if not os.path.isabs(repo_path):
+            repo_path = os.path.abspath(repo_path)
+            print(f"[Server] Converted repo_path to absolute: {repo_path}")
+        
         # Validate repo path
-        if not os.path.exists(request.repo_path):
+        if not os.path.exists(repo_path):
             raise HTTPException(
                 status_code=400, 
-                detail=f"Repository path does not exist: {request.repo_path}"
+                detail=f"Repository path does not exist: {repo_path}"
             )
         
-        # Create suggestion agent
-        agent = create_suggestion_agent(request.repo_path)
+        print(f"[Server] Processing suggestion request for: {repo_path}")
+        print(f"[Server] Issue: {request.issue.title}")
+        print(f"[Server] Labels: {request.issue.labels}")
         
-        # Prepare task
+        # Create suggestion agent
+        agent = create_suggestion_agent(repo_path)
+        
+        # Prepare task with repo path context
         task = f"""Analyze this GitHub issue and provide detailed code change suggestions:
 
+Repository Path: {repo_path}
 Title: {request.issue.title}
 Body: {request.issue.body}
 Labels: {', '.join(request.issue.labels)}
 
-Provide comprehensive suggestions including:
+IMPORTANT: You are working in the directory: {repo_path}
+
+First, use the available tools to understand the repository:
+1. Call list_files('{repo_path}') to see what files exist
+2. Call load_repo_analysis('{repo_path}') to get repo context (if available)
+3. Call logged_file_read() on relevant files using relative paths
+
+Then provide comprehensive suggestions including:
 1. Detailed analysis of the issue
 2. All files that need to be touched with specific actions
 3. Code examples with before/after comparisons
@@ -113,8 +131,11 @@ Provide comprehensive suggestions including:
 Do NOT make any actual file changes. Only provide suggestions.
 """
         
+        print(f"[Server] Executing agent...")
         # Execute agent
         result = agent(task)
+        
+        print(f"[Server] Agent completed successfully")
         
         # Convert to response model
         return SuggestionResponse(
@@ -140,6 +161,8 @@ Do NOT make any actual file changes. Only provide suggestions.
         )
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Agent failed: {str(e)}")
 
 # Automation endpoint
@@ -149,71 +172,101 @@ async def automate_changes(request: ProcessIssueRequest):
     Analyze an issue and automatically make code changes to fix it.
     """
     try:
+        # Convert to absolute path
+        repo_path = request.repo_path
+        if not os.path.isabs(repo_path):
+            repo_path = os.path.abspath(repo_path)
+            print(f"[Server] Converted repo_path to absolute: {repo_path}")
+        
         # Validate repo path
-        if not os.path.exists(request.repo_path):
+        if not os.path.exists(repo_path):
             raise HTTPException(
                 status_code=400, 
-                detail=f"Repository path does not exist: {request.repo_path}"
+                detail=f"Repository path does not exist: {repo_path}"
             )
         
+        print(f"[Server] Processing automation request for: {repo_path}")
+        print(f"[Server] Issue: {request.issue.title}")
+        print(f"[Server] Labels: {request.issue.labels}")
+        
         # Create automation agent
-        agent = create_automation_agent(request.repo_path)
+        agent = create_automation_agent(repo_path)
         
         # Prepare comprehensive task with PR body instructions
-        pr_body_output = os.path.join(request.repo_path, ".devflow-pr-body.md")
+        pr_body_output = os.path.join(repo_path, ".devflow-pr-body.md")
         
         task = f"""Process this GitHub issue and make the necessary code changes:
 
+Repository Path: {repo_path}
 Title: {request.issue.title}
 Body: {request.issue.body}
 Labels: {', '.join(request.issue.labels)}
 
+IMPORTANT: You are working in the directory: {repo_path}
+
 WORKFLOW STEPS:
-1. Analyze the issue carefully and understand what needs to be fixed
-2. Review repo-analysis.md and dependency-graph.json for context
-3. Make all necessary code changes to fix the issue
-4. Track all files you create, modify, or delete
-5. Generate a comprehensive PR body that includes:
-   - Clear overview of what was changed and why
-   - Technical implementation details
-   - List of all files modified/created/deleted with brief descriptions
-   - Testing instructions for reviewers
-   - Any breaking changes or important notes
-   - References to the issue being resolved
+1. First, understand the repository structure:
+   - Call list_files('{repo_path}') to see what files exist
+   - Call load_repo_analysis('{repo_path}') for repo context (if available)
+   
+2. Read relevant files using logged_file_read() with relative paths
+   - Example: logged_file_read('main.py') not logged_file_read('{repo_path}/main.py')
 
-CRITICAL: After completing all code changes, use the generate_pr_body_tool to create a professional PR description.
-Save it to: {pr_body_output}
+3. Make necessary code changes:
+   - Use logged_file_write('new_file.py', content) for new files
+   - Use logged_editor('existing.py', old_code, new_code) for edits
 
-The PR body should be comprehensive, professional, and help reviewers understand:
-- What problem was solved
-- How it was solved
-- What changed in the codebase
-- How to verify the changes work
+4. Generate PR body:
+   - Call generate_pr_body_tool(
+       output_path='{pr_body_output}',
+       issue_title='{request.issue.title}',
+       summary='What you did',
+       files_modified='List of files changed',
+       technical_details='How you implemented it',
+       testing_instructions='How to test'
+     )
 
-IMPORTANT NOTES:
-- Only include actual code files in changes_made (not the PR body file)
-- The pr_body_file field should contain the relative path: .devflow-pr-body.md
-- Provide detailed, accurate information in your response
+5. Return AutomationResult with:
+   - changes_made: List of relative file paths you modified
+   - pr_body_file: '.devflow-pr-body.md'
+   - summary: Brief description of changes
 
-Return detailed information about all changes made and the location of the generated PR body.
+CRITICAL RULES:
+- Use relative paths for all file operations
+- Track ONLY code files in changes_made (not .devflow-pr-body.md)
+- Stop after 10-15 tool calls - don't loop infinitely
+- If you read the same file twice, you have enough context - make changes
+
+Return detailed information about all changes made.
 """
         
+        print(f"[Server] Executing agent...")
         # Execute agent
         result = agent(task)
+        
+        print(f"[Server] Agent completed")
+        print(f"[Server] Success: {result.success}")
+        print(f"[Server] Changes made: {len(result.changes_made)}")
         
         # Convert FileChange objects to simple string paths
         changes_list = []
         for change in result.changes_made:
             if hasattr(change, 'file_path'):
                 changes_list.append(change.file_path)
+            elif isinstance(change, dict) and 'file_path' in change:
+                changes_list.append(change['file_path'])
             else:
                 changes_list.append(str(change))
         
+        print(f"[Server] Processed changes: {changes_list}")
+        
         # Verify PR body was created
         if result.pr_body_file:
-            full_pr_path = os.path.join(request.repo_path, result.pr_body_file)
-            if not os.path.exists(full_pr_path):
-                print(f"Warning: PR body file not found at: {full_pr_path}")
+            full_pr_path = os.path.join(repo_path, result.pr_body_file)
+            if os.path.exists(full_pr_path):
+                print(f"[Server] PR body found at: {full_pr_path}")
+            else:
+                print(f"[Server] Warning: PR body file not found at: {full_pr_path}")
         
         # Return response
         return AutomationResponse(
@@ -246,14 +299,21 @@ async def process_issue(request: ProcessIssueRequest):
     - If 'devflow-agent-automate' label present -> automate mode
     - Otherwise -> default to suggestion mode
     """
+    print(f"[Server] Received process request: {request.issue.title}")
+    print(f"[Server] Repo path: {request.repo_path}")
+    print(f"[Server] Labels: {request.issue.labels}")
+    
     labels = request.issue.labels
     
     if 'devflow-suggestion' in labels:
+        print("[Server] Mode: SUGGESTION")
         return await suggest_changes(request)
     elif 'devflow-agent-automate' in labels:
+        print("[Server] Mode: AUTOMATE")
         return await automate_changes(request)
     else:
         # Default to suggestion
+        print("[Server] Mode: SUGGESTION (default)")
         return await suggest_changes(request)
 
 if __name__ == "__main__":
