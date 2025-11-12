@@ -1,0 +1,9 @@
+{
+  "include": ["python-agents"],
+  "executionEnvironments": [
+    {
+      "root": "python-agents",
+      "extraPaths": ["python-agents"]
+    }
+  ]
+}

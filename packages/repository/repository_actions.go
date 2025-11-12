@@ -24,20 +24,77 @@ func CloneRepository(repoName string) (string, string, error) {
 	slog.Info("Cloning", "repo", repoName)
 
 	cmd := exec.Command("git", "clone", fmt.Sprintf("--depth=%d", cfg.Repository.CloneDepth), cloneURL, repoDir)
-	_, err := cmd.CombinedOutput()
-
-	if err != nil {
-		slog.Error("Clone Failed", "error", err)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		slog.Error("Clone Failed", "error", err, "stdout", string(out))
 		return "", "", err
 	}
 
 	slog.Info("Repository cloned to", "repoDir", repoDir)
 
-	// Return cleanup function
+	// --- EOL normalization WITHOUT touching tracked files (.gitattributes) ---
+
+	// 1) Ensure Git won’t auto-convert line endings during apply/commit
+	_ = exec.Command("git", "-C", repoDir, "config", "--local", "core.autocrlf", "false").Run()
+
+	// 2) Install repo-local (UNTRACKED) attributes: .git/info/attributes
+	infoAttr := filepath.Join(repoDir, ".git", "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(infoAttr), 0755); err == nil {
+		attrContent := `* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+`
+		if err := os.WriteFile(infoAttr, []byte(attrContent), 0644); err != nil {
+			slog.Warn("Failed to write .git/info/attributes", "error", err)
+		} else {
+			slog.Info("[RepoSetup] Installed untracked attributes", "path", infoAttr)
+		}
+	} else {
+		slog.Warn("Failed to create .git/info directory", "error", err)
+	}
+
+	// 3) Ignore agent artifacts locally (no tracked changes in PRs)
+	excludePath := filepath.Join(repoDir, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err == nil {
+		_ = appendUniqueLines(excludePath, []string{
+			"/.devflow/",
+			".devflow/",
+			"/.devflow/*",
+			"*.bak",
+		})
+	}
+
+	// 4) Renormalize working tree per the (untracked) attributes — no commit needed
+	if out, err := exec.Command("git", "-C", repoDir, "add", "--renormalize", ".").CombinedOutput(); err != nil {
+		slog.Warn("Renormalize failed", "error", err, "stdout", string(out))
+	} else {
+		slog.Info("Renormalized line endings according to .git/info/attributes")
+	}
 
 	return repoDir, cloneURL, nil
 }
 
+// appendUniqueLines appends lines to a file only if they don't already exist.
+func appendUniqueLines(path string, lines []string) error {
+	var existing string
+	if b, err := os.ReadFile(path); err == nil {
+		existing = string(b)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for _, ln := range lines {
+		if !strings.Contains(existing, ln) {
+			if _, err := f.WriteString(ln + "\n"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 func AnalyzeRepo(ctx *probot.Context, outputFile, LocalPath, repoURL string) error {
 
 	fmt.Printf("Creating analysis of: %s\n", repoURL)
@@ -57,6 +114,7 @@ func AnalyzeRepo(ctx *probot.Context, outputFile, LocalPath, repoURL string) err
 	fmt.Printf("Repository analysis saved to: %s\n", outputFile)
 	return nil
 }
+
 func CommitFile(ctx *probot.Context, repoName, branchName, commitMessage, filePath string) error {
 	parts := strings.Split(repoName, "/")
 	owner := parts[0]
