@@ -47,7 +47,6 @@ func HandleIssues(ctx *probot.Context) error {
 	case "opened":
 		slog.Info("Issue opened - will process when labeled", "issueNumber", issueNumber)
 		return nil
-		// return handleIssueOpened(ctx, event, repoName, issueNumber, issueTitle)
 	case "labeled":
 		return handleIssueLabeled(ctx, event, repoName, issueNumber, issueTitle)
 	default:
@@ -105,6 +104,29 @@ func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTi
 	if err != nil {
 		slog.Error("Failed to clone repository", "error", err)
 		return err
+	}
+
+	// --- Ensure .devflow reflects latest origin/main BEFORE invoking Python agent ---
+	headSHA, err := repoActions.GetOriginMainSHA(repoPath)
+	if err != nil {
+		slog.Error("Failed to resolve origin/main", "error", err)
+		return err
+	}
+	devflowCommitPath := filepath.Join(repoPath, ".devflow", "devflow-commit.txt")
+	devflowSHA := ""
+	if b, err := os.ReadFile(devflowCommitPath); err == nil {
+		devflowSHA = strings.TrimSpace(string(b))
+	}
+	if devflowSHA != headSHA {
+		slog.Info("Devflow stale; syncing", "devflow", devflowSHA, "head", headSHA)
+		if err := repoActions.RunIncrementalDevflowSync(ctx, repoName, repoPath, headSHA); err != nil {
+			slog.Error("Devflow incremental sync failed", "error", err)
+			return err
+		}
+		// refresh HEAD just in case
+		if _, err := repoActions.GetOriginMainSHA(repoPath); err != nil {
+			slog.Warn("Post-sync fetch failed", "error", err)
+		}
 	}
 
 	// Check if knowledge base exists

@@ -95,8 +95,8 @@ func appendUniqueLines(path string, lines []string) error {
 	}
 	return nil
 }
-func AnalyzeRepo(ctx *probot.Context, outputFile, LocalPath, repoURL string) error {
 
+func AnalyzeRepo(ctx *probot.Context, outputFile, LocalPath, repoURL string) error {
 	fmt.Printf("Creating analysis of: %s\n", repoURL)
 
 	analyzer := &RepoAnalyzer{
@@ -398,4 +398,24 @@ func SaveAnalysisToFile(content, filePath string) error {
 	}
 	slog.Info("Analysis saved successfully", "file", filePath)
 	return nil
+}
+
+func ensureCommitAvailable(repoPath, sha string) error {
+	if sha == "" {
+		return nil
+	}
+	if _, err := git(repoPath, "cat-file", "-e", sha+"^{commit}"); err == nil {
+		return nil
+	}
+	if _, err := git(repoPath, "fetch", "origin", sha); err == nil {
+		if _, err2 := git(repoPath, "cat-file", "-e", sha+"^{commit}"); err2 == nil {
+			return nil
+		}
+	}
+	if _, err := git(repoPath, "fetch", "--unshallow"); err == nil {
+		if _, err2 := git(repoPath, "cat-file", "-e", sha+"^{commit}"); err2 == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("commit %s not available locally after fetch/unshallow", sha)
 }
