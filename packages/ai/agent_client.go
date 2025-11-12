@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath" // <-- added
 	"time"
 
 	"github.com/google/go-github/github"
@@ -26,11 +27,30 @@ type ProcessIssueRequest struct {
 	Mode     string    `json:"mode"`
 }
 
+// MarshalJSON ensures RepoPath is absolute before sending to the Python server.
+func (p ProcessIssueRequest) MarshalJSON() ([]byte, error) {
+	abs, err := filepath.Abs(p.RepoPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make repo path absolute: %w", err)
+	}
+	// Reconstruct the JSON payload with the absolute path
+	type payload struct {
+		RepoPath string    `json:"repo_path"`
+		Issue    IssueData `json:"issue"`
+		Mode     string    `json:"mode"`
+	}
+	return json.Marshal(payload{
+		RepoPath: abs,
+		Issue:    p.Issue,
+		Mode:     p.Mode,
+	})
+}
+
 // PythonAgentResult represents the result from the Python Strands agent
 type PythonAgentResult struct {
 	Completed    bool     `json:"completed"`
 	Success      bool     `json:"success"`
-	ChangesMade  []string `json:"changes_made"`
+	ChangesMade  []string `json:"changes_made"` // Array of file paths
 	Summary      string   `json:"summary"`
 	PRBodyFile   string   `json:"pr_body_file"`
 	ErrorMessage string   `json:"error_message"`
@@ -84,7 +104,7 @@ func CallPythonStrandsAgentWithConfig(repoPath string, issue *github.Issue, conf
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	slog.Info("Calling agent server",
+	slog.Info("Calling Python agent server",
 		"url", config.BaseURL,
 		"repoPath", repoPath,
 		"issueTitle", issue.GetTitle(),
@@ -112,19 +132,21 @@ func CallPythonStrandsAgentWithConfig(repoPath string, issue *github.Issue, conf
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	slog.Info("Agent server response",
+	slog.Info("Agent server response received",
 		"statusCode", resp.StatusCode,
 		"contentLength", len(responseBody))
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("agent server returned error status %d: %s", resp.StatusCode, string(responseBody))
+		return nil, fmt.Errorf("agent server returned error status %d: %s",
+			resp.StatusCode, string(responseBody))
 	}
 
 	// Parse response
 	result := &PythonAgentResult{}
 	if err := json.Unmarshal(responseBody, result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w\nBody: %s", err, string(responseBody))
+		return nil, fmt.Errorf("failed to parse response: %w\nBody: %s",
+			err, string(responseBody))
 	}
 
 	slog.Info("Agent execution completed",
@@ -148,8 +170,11 @@ func HealthCheck(baseURL string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("health check returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("health check returned status %d: %s",
+			resp.StatusCode, string(body))
 	}
 
+	slog.Info("Agent server health check passed", "url", baseURL)
 	return nil
 }

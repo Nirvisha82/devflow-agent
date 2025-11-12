@@ -107,8 +107,8 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 
 	slog.Info("Committing multiple files to branch", "branch", branchName, "fileCount", len(filePaths))
 
-	// Get the current commit SHA for the branch
-	ref, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/"+branchName)
+	// ✅ Use "heads/<branch>" (NOT "refs/heads/<branch>")
+	ref, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "heads/"+branchName)
 	if err != nil {
 		slog.Error("Failed to get branch reference", "error", err, "branch", branchName)
 		return err
@@ -124,25 +124,34 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 	// Create tree entries for all files
 	var entries []*github.TreeEntry
 	for _, filePath := range filePaths {
-		// Read file content
+		// Read file content from the local repo checkout
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			slog.Error("Failed to read file locally", "file", filePath, "error", err)
 			return err
 		}
 
-		// Get relative path within the repo (remove the temp repo path prefix)
+		// Compute repo-relative path
 		repoFilePath, err := filepath.Rel(repoPath, filePath)
 		if err != nil {
 			return fmt.Errorf("failed to calculate relative path for %s using root %s: %w", filePath, repoPath, err)
 		}
 
+		// If this is the "init" case, place files under .devflow/
 		if init {
 			fileName := filepath.Base(filePath)
 			repoFilePath = ".devflow/" + fileName
 		}
 
-		// Convert content to string pointer for github.Blob
+		// ✅ CRITICAL: normalize path to POSIX (Git tree paths must use forward slashes)
+		repoFilePath = filepath.ToSlash(repoFilePath)
+		// Trim any accidental "./"
+		repoFilePath = strings.TrimPrefix(repoFilePath, "./")
+		// Safety: do not allow escaping the repo root
+		if strings.HasPrefix(repoFilePath, "../") {
+			return fmt.Errorf("refusing to commit path outside repo: %s", repoFilePath)
+		}
+
 		contentStr := string(content)
 
 		// Create blob
@@ -150,33 +159,27 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 			Content:  &contentStr,
 			Encoding: github.String("utf-8"),
 		}
-
 		createdBlob, _, err := ctx.GitHub.Git.CreateBlob(context.Background(), owner, repo, blob)
 		if err != nil {
-			// BUG FIX 2: Use the correctly scoped 'repoFilePath' for logging
 			slog.Error("Failed to create blob for content", "repoPath", repoFilePath, "error", err)
 			return err
 		}
 
-		// Create tree entry
+		// Create tree entry (path MUST be POSIX style)
 		entry := &github.TreeEntry{
 			Path: github.String(repoFilePath),
-			Mode: github.String("100644"), // Standard file mode
+			Mode: github.String("100644"),
 			Type: github.String("blob"),
 			SHA:  createdBlob.SHA,
 		}
 		entries = append(entries, entry)
 	}
 
-	// The original code was unnecessarily converting []*github.TreeEntry to []github.TreeEntry
-	// for the next call. The go-github library accepts the pointer slice directly.
-
-	// Create new tree
+	// Create new tree against current base tree
 	treeEntries := make([]github.TreeEntry, len(entries))
 	for i, entry := range entries {
 		treeEntries[i] = *entry
 	}
-
 	newTree, _, err := ctx.GitHub.Git.CreateTree(context.Background(), owner, repo, commit.Tree.GetSHA(), treeEntries)
 	if err != nil {
 		slog.Error("Failed to create tree", "error", err)
@@ -189,14 +192,13 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 		Tree:    newTree,
 		Parents: []github.Commit{*commit},
 	}
-
 	createdCommit, _, err := ctx.GitHub.Git.CreateCommit(context.Background(), owner, repo, newCommit)
 	if err != nil {
 		slog.Error("Failed to create commit", "error", err)
 		return err
 	}
 
-	// Update branch reference
+	// Move branch to the new commit
 	ref.Object.SHA = createdCommit.SHA
 	_, _, err = ctx.GitHub.Git.UpdateRef(context.Background(), owner, repo, ref, false)
 	if err != nil {
@@ -204,7 +206,8 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 		return err
 	}
 
-	slog.Info("Successfully committed multiple files", "branch", branchName, "fileCount", len(filePaths), "commit", createdCommit.GetSHA())
+	slog.Info("Successfully committed multiple files",
+		"branch", branchName, "fileCount", len(filePaths), "commit", createdCommit.GetSHA())
 	return nil
 }
 

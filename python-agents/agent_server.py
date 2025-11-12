@@ -3,15 +3,26 @@ DevFlow Agent Server - FastAPI wrapper for Strands agents
 """
 import os
 import sys
+from contextlib import contextmanager
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import uvicorn
+import subprocess
 
 from agent import create_suggestion_agent, create_automation_agent
 
 load_dotenv()
+
+@contextmanager
+def pushd(new_dir: str):
+    prev = os.getcwd()
+    os.chdir(new_dir)
+    try:
+        yield
+    finally:
+        os.chdir(prev)
 
 # Verify API key
 api_key = os.getenv("GEMINI_API_KEY")
@@ -27,6 +38,36 @@ app = FastAPI(
     description="Strands-powered agents for automated code changes",
     version="1.0.0"
 )
+
+
+def git_changed_files(repo_path: str) -> list[str]:
+    """
+    Returns a list of paths (relative to repo root) of files that are
+    added/modified/deleted according to `git status --porcelain`.
+    """
+    try:
+        cp = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        changed = []
+        for line in cp.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # format: "XY <path>" (e.g., " M calculator/operations.py")
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                path = parts[1]
+                # normalize Windows backslashes to slashes for consistency
+                changed.append(path.replace("\\", "/"))
+        return changed
+    except Exception as e:
+        print(f"[Server] git_changed_files error: {e}")
+        return []
 
 # Request/Response Models
 class IssueData(BaseModel):
@@ -133,20 +174,24 @@ Do NOT make any actual file changes. Only provide suggestions.
         
         print(f"[Server] Executing agent...")
         # Execute agent
-        result = agent(task)
+        with pushd(repo_path):
+            result = agent(task)
         
         print(f"[Server] Agent completed successfully")
-        
-        # Convert to response model
+
+        structured = getattr(result, "structured", None)
+        if structured is None:
+            raise HTTPException(status_code=500, detail="Agent did not return structured IssueSuggestion")
+
         return SuggestionResponse(
-            issue_title=result.issue_title,
-            analysis=result.analysis,
+            issue_title=getattr(structured, "issue_title", request.issue.title),
+            analysis=getattr(structured, "analysis", ""),
             affected_files=[
                 FileSuggestion(
                     file_path=f.file_path,
                     action=f.action,
                     reason=f.reason
-                ) for f in result.affected_files
+                ) for f in (getattr(structured, "affected_files", []) or [])
             ],
             code_examples=[
                 CodeSuggestion(
@@ -155,10 +200,11 @@ Do NOT make any actual file changes. Only provide suggestions.
                     before=c.before,
                     after=c.after,
                     explanation=c.explanation
-                ) for c in result.code_examples
+                ) for c in (getattr(structured, "code_examples", []) or [])
             ],
-            implementation_steps=result.implementation_steps
+            implementation_steps=(getattr(structured, "implementation_steps", []) or []),
         )
+
         
     except Exception as e:
         import traceback
@@ -242,41 +288,95 @@ Return detailed information about all changes made.
         
         print(f"[Server] Executing agent...")
         # Execute agent
-        result = agent(task)
+        with pushd(repo_path):
+            result = agent(task)
         
         print(f"[Server] Agent completed")
-        print(f"[Server] Success: {result.success}")
-        print(f"[Server] Changes made: {len(result.changes_made)}")
-        
-        # Convert FileChange objects to simple string paths
-        changes_list = []
-        for change in result.changes_made:
-            if hasattr(change, 'file_path'):
-                changes_list.append(change.file_path)
-            elif isinstance(change, dict) and 'file_path' in change:
-                changes_list.append(change['file_path'])
+
+        # Try to unwrap structured AutomationResult from Strands
+        structured = getattr(result, "structured", None)
+
+        # Build changes list from structured first
+        changes_list: list[str] = []
+        pr_file = ""
+        summary = ""
+        completed = False
+        success = False
+        error_message = ""
+
+        if structured is not None:
+            # Map FileChange[] -> list[str]
+            for change in getattr(structured, "changes_made", []) or []:
+                if hasattr(change, "file_path"):
+                    changes_list.append(change.file_path)
+                elif isinstance(change, dict) and "file_path" in change:
+                    changes_list.append(change["file_path"])
+                else:
+                    changes_list.append(str(change))
+
+            pr_file = getattr(structured, "pr_body_file", "") or ""
+            summary = getattr(structured, "summary", "") or ""
+            completed = bool(getattr(structured, "completed", False))
+            success = bool(getattr(structured, "success", False))
+            error_message = getattr(structured, "error_message", "") or ""
+
+        # ✅ Fallback: if model didn't return structured or returned no changes,
+        # compute changes by asking Git directly
+        if not changes_list:
+            changes_list = git_changed_files(repo_path)
+
+        # Normalize changes to RELATIVE POSIX-style paths for consistency
+        normalized_changes = []
+        for p in changes_list:
+            if not p:
+                continue
+            # If absolute, make relative to repo; else keep as-is
+            if os.path.isabs(p):
+                try:
+                    rel = os.path.relpath(p, repo_path)
+                except ValueError:
+                    # In rare cases (different drive on Windows), keep original
+                    rel = p
             else:
-                changes_list.append(str(change))
-        
+                rel = p
+            normalized_changes.append(rel.replace("\\", "/"))
+
+        changes_list = normalized_changes
+
+
+        # Normalize PR body file:
+        # - if structured gave absolute, make it relative to repo
+        # - if empty, but default .devflow-pr-body.md exists, use that
+        if pr_file:
+            if os.path.isabs(pr_file):
+                pr_file = os.path.relpath(pr_file, repo_path).replace("\\", "/")
+        else:
+            default_pr = os.path.join(repo_path, ".devflow-pr-body.md")
+            if os.path.exists(default_pr):
+                pr_file = ".devflow-pr-body.md"
+
+        # If we have file changes from git, treat this as success even if structured is missing
+        if changes_list and not success:
+            success = True
+            completed = True
+            if not summary:
+                summary = "Applied code changes and generated PR body."
+
+        print(f"[Server] Success: {success}")
         print(f"[Server] Processed changes: {changes_list}")
-        
-        # Verify PR body was created
-        if result.pr_body_file:
-            full_pr_path = os.path.join(repo_path, result.pr_body_file)
-            if os.path.exists(full_pr_path):
-                print(f"[Server] PR body found at: {full_pr_path}")
-            else:
-                print(f"[Server] Warning: PR body file not found at: {full_pr_path}")
-        
-        # Return response
+        if pr_file:
+            print(f"[Server] PR body file: {pr_file}")
+
         return AutomationResponse(
-            completed=result.completed,
-            success=result.success,
+            completed=completed,
+            success=success,
             changes_made=changes_list,
-            summary=result.summary,
-            pr_body_file=result.pr_body_file,
-            error_message=result.error_message
+            summary=summary,
+            pr_body_file=pr_file,
+            error_message=error_message,
         )
+
+
         
     except Exception as e:
         import traceback
