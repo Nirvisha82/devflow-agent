@@ -27,6 +27,7 @@ from tools import (
     # PR body generation
     generate_pr_body_tool,
 )
+from strands_tools import file_write, file_read, editor 
 
 load_dotenv()
 
@@ -73,9 +74,9 @@ def create_suggestion_agent(repo_path: str) -> Agent:
             load_repo_analysis,
             load_dependency_graph,
             list_files,
+            file_write
         ],
         system_prompt=system_prompt,
-        structured_output_model=IssueSuggestion,
     )
 
     print("[Agent] Suggestion agent created")

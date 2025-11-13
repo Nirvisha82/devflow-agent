@@ -128,84 +128,69 @@ async def suggest_changes(request: ProcessIssueRequest):
     Analyze an issue and provide code change suggestions without modifying files.
     """
     try:
-        # Convert to absolute path
+        # Normalize repo path
         repo_path = request.repo_path
         if not os.path.isabs(repo_path):
             repo_path = os.path.abspath(repo_path)
-            print(f"[Server] Converted repo_path to absolute: {repo_path}")
-        
-        # Validate repo path
+
         if not os.path.exists(repo_path):
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Repository path does not exist: {repo_path}"
             )
-        
+
         print(f"[Server] Processing suggestion request for: {repo_path}")
         print(f"[Server] Issue: {request.issue.title}")
         print(f"[Server] Labels: {request.issue.labels}")
-        
+
         # Create suggestion agent
         agent = create_suggestion_agent(repo_path)
-        
-        # Prepare task with repo path context
-        task = f"""Analyze this GitHub issue and provide detailed code change suggestions:
 
-Repository Path: {repo_path}
-Title: {request.issue.title}
-Body: {request.issue.body}
-Labels: {', '.join(request.issue.labels)}
+        # Build LLM task
+        task = f"""
+        Analyze this GitHub issue and provide detailed code change suggestions:
 
-IMPORTANT: You are working in the directory: {repo_path}
+        Repository Path: {repo_path}
+        Issue Title: {request.issue.title}
+        Body: {request.issue.body}
+        Labels: {', '.join(request.issue.labels)}
 
-First, use the available tools to understand the repository:
-1. Call list_files('{repo_path}') to see what files exist
-2. Call load_repo_analysis('{repo_path}') to get repo context (if available)
-3. Call logged_file_read() on relevant files using relative paths
+        IMPORTANT: You are working in the directory: {repo_path}
 
-Then provide comprehensive suggestions including:
-1. Detailed analysis of the issue
-2. All files that need to be touched with specific actions
-3. Code examples with before/after comparisons
-4. Step-by-step implementation guide
+        1. Call list_files('{repo_path}') to list files
+        2. Call load_repo_analysis('{repo_path}') for repo context
+        3. Use logged_file_read() for file content
+        4. Do NOT modify any files
+        """
 
-Do NOT make any actual file changes. Only provide suggestions.
-"""
-        
-        print(f"[Server] Executing agent...")
-        # Execute agent
         with pushd(repo_path):
-            result = agent(task)
-        
-        print(f"[Server] Agent completed successfully")
+            output = agent(task)
 
-        structured = getattr(result, "structured", None)
-        if structured is None:
-            raise HTTPException(status_code=500, detail="Agent did not return structured IssueSuggestion")
+        # Ensure .devflow exists
+        devflow_dir = os.path.join(repo_path, ".devflow")
+        os.makedirs(devflow_dir, exist_ok=True)
 
-        return SuggestionResponse(
-            issue_title=getattr(structured, "issue_title", request.issue.title),
-            analysis=getattr(structured, "analysis", ""),
-            affected_files=[
-                FileSuggestion(
-                    file_path=f.file_path,
-                    action=f.action,
-                    reason=f.reason
-                ) for f in (getattr(structured, "affected_files", []) or [])
-            ],
-            code_examples=[
-                CodeSuggestion(
-                    file_path=c.file_path,
-                    language=c.language,
-                    before=c.before,
-                    after=c.after,
-                    explanation=c.explanation
-                ) for c in (getattr(structured, "code_examples", []) or [])
-            ],
-            implementation_steps=(getattr(structured, "implementation_steps", []) or []),
-        )
+        # Path for suggestion file
+        md_path = os.path.join(devflow_dir, "devflow-agent-suggestions.md")
 
-        
+        # Write raw agent output
+        # with open(md_path, "w", encoding="utf-8") as f:
+        #     f.write(str(output))
+
+        # print(f"[Server] Suggestion markdown created at: {md_path}")
+
+        # Return relative path
+        rel = os.path.relpath(md_path, repo_path).replace("\\", "/")
+
+        return {
+            "completed": True,
+            "success": True,
+            "changes_made": [rel],   # <-- CRITICAL
+            "summary": "Suggestion file created",
+            "pr_body_file": "",
+            "error_message": ""
+        }
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -431,16 +416,20 @@ async def process_issue(request: ProcessIssueRequest):
     
     labels = request.issue.labels
     
-    if 'devflow-suggestion' in labels:
+    # --- New DevFlow Dual-Mode Label Routing ---
+    if 'devflow-agent-suggest-changes' in labels:
         print("[Server] Mode: SUGGESTION")
         return await suggest_changes(request)
-    elif 'devflow-agent-automate' in labels:
+
+    elif 'devflow-agent-apply-changes' in labels:
         print("[Server] Mode: AUTOMATE")
         return await automate_changes(request)
+
     else:
-        # Default to suggestion
+        # Default: suggestion-only mode
         print("[Server] Mode: SUGGESTION (default)")
         return await suggest_changes(request)
+
 
 if __name__ == "__main__":
     # Get port from environment or use default

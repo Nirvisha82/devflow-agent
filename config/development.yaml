@@ -6,15 +6,16 @@ installations:
 
 issues:
   required_labels:
-    - devflow-agent-automate
+    - devflow-agent-suggest-changes
+    - devflow-agent-apply-changes
   branch_prefix: issue-
   branch_name_max_length: 20
 
 labels:
-  - name: devflow-agent-automate
+  - name: devflow-agent-suggest-changes
     color: d73a4a
     description: NewBranch-Analysis-Suggestions-PR
-  - name: devflow-agent-bug-fix
+  - name: devflow-agent-apply-changes
     color: a2eeef
     description: NewBranch-Analysis-Action-PR
 
@@ -31,7 +32,7 @@ repository:
   default_branch: main
   devflow_directory: .devflow
   temp_repo_prefix: temp_repo_
-  cleanup_temp_repos: false
+  cleanup_temp_repos: true
 
 debug:
   enabled: true
