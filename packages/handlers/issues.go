@@ -132,21 +132,29 @@ func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTi
 	// Check if knowledge base exists
 	repoStructureFile := cfg.GetDevflowPath(repoPath, cfg.Files.StructureFile)
 	if _, err := os.Stat(repoStructureFile); os.IsNotExist(err) {
-		slog.Info("Devflow knowledge base not found, creating it first")
-		if err := initializeDevflowKnowledgeBaseFromIssues(ctx, repoName); err != nil {
-			slog.Error("Failed to initialize knowledge base", "error", err)
-			return err
+		slog.Error("Devflow knowledge base not initialized for repo", "repo", repoName)
+
+		// Post a helpful comment on the issue instead of trying to initialize here
+		issue := event.Issue
+		owner := event.GetRepo().GetOwner().GetLogin()
+		name := event.GetRepo().GetName()
+
+		commentBody := `DevFlow isn't fully set up for this repository yet.
+
+	Please merge the "Initialize Devflow Knowledge Base" PR (branch "devflow-init") that DevFlow created for this repo, and then re-apply the label to this issue.`
+
+		_, _, cErr := ctx.GitHub.Issues.CreateComment(
+			context.Background(),
+			owner,
+			name,
+			int(issue.GetNumber()),
+			&github.IssueComment{Body: &commentBody},
+		)
+		if cErr != nil {
+			slog.Error("Failed to post missing-knowledge-base comment", "error", cErr)
 		}
 
-		// Re-clone to get updated knowledge base
-		if cleanupErr := repoActions.CleanupRepo(repoPath); cleanupErr != nil {
-			slog.Error("Failed to cleanup after knowledge base creation", "error", cleanupErr)
-		}
-		repoPath, _, err = repoActions.CloneRepository(repoName)
-		if err != nil {
-			slog.Error("Failed to re-clone repository", "error", err)
-			return err
-		}
+		return fmt.Errorf("devflow knowledge base not initialized for repo %s", repoName)
 	}
 
 	// Call Python Strands agent
