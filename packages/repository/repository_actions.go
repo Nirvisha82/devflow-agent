@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"devflow-agent/packages/config"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,22 +24,79 @@ func CloneRepository(repoName string) (string, string, error) {
 	slog.Info("Cloning", "repo", repoName)
 
 	cmd := exec.Command("git", "clone", fmt.Sprintf("--depth=%d", cfg.Repository.CloneDepth), cloneURL, repoDir)
-	_, err := cmd.CombinedOutput()
-
-	if err != nil {
-		slog.Error("Clone Failed", "error", err)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		slog.Error("Clone Failed", "error", err, "stdout", string(out))
 		return "", "", err
 	}
 
 	slog.Info("Repository cloned to", "repoDir", repoDir)
 
-	// Return cleanup function
+	// --- EOL normalization WITHOUT touching tracked files (.gitattributes) ---
+
+	// 1) Ensure Git won’t auto-convert line endings during apply/commit
+	_ = exec.Command("git", "-C", repoDir, "config", "--local", "core.autocrlf", "false").Run()
+
+	// 2) Install repo-local (UNTRACKED) attributes: .git/info/attributes
+	infoAttr := filepath.Join(repoDir, ".git", "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(infoAttr), 0755); err == nil {
+		attrContent := `* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+`
+		if err := os.WriteFile(infoAttr, []byte(attrContent), 0644); err != nil {
+			slog.Warn("Failed to write .git/info/attributes", "error", err)
+		} else {
+			slog.Info("[RepoSetup] Installed untracked attributes", "path", infoAttr)
+		}
+	} else {
+		slog.Warn("Failed to create .git/info directory", "error", err)
+	}
+
+	// 3) Ignore agent artifacts locally (no tracked changes in PRs)
+	excludePath := filepath.Join(repoDir, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err == nil {
+		_ = appendUniqueLines(excludePath, []string{
+			"/.devflow/",
+			".devflow/",
+			"/.devflow/*",
+			"*.bak",
+		})
+	}
+
+	// 4) Renormalize working tree per the (untracked) attributes — no commit needed
+	if out, err := exec.Command("git", "-C", repoDir, "add", "--renormalize", ".").CombinedOutput(); err != nil {
+		slog.Warn("Renormalize failed", "error", err, "stdout", string(out))
+	} else {
+		slog.Info("Renormalized line endings according to .git/info/attributes")
+	}
 
 	return repoDir, cloneURL, nil
 }
 
-func AnalyzeRepo(ctx *probot.Context, outputFile, LocalPath, repoURL string) error {
+// appendUniqueLines appends lines to a file only if they don't already exist.
+func appendUniqueLines(path string, lines []string) error {
+	var existing string
+	if b, err := os.ReadFile(path); err == nil {
+		existing = string(b)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for _, ln := range lines {
+		if !strings.Contains(existing, ln) {
+			if _, err := f.WriteString(ln + "\n"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
+func AnalyzeRepo(ctx *probot.Context, outputFile, LocalPath, repoURL string) error {
 	fmt.Printf("Creating analysis of: %s\n", repoURL)
 
 	analyzer := &RepoAnalyzer{
@@ -56,6 +114,7 @@ func AnalyzeRepo(ctx *probot.Context, outputFile, LocalPath, repoURL string) err
 	fmt.Printf("Repository analysis saved to: %s\n", outputFile)
 	return nil
 }
+
 func CommitFile(ctx *probot.Context, repoName, branchName, commitMessage, filePath string) error {
 	parts := strings.Split(repoName, "/")
 	owner := parts[0]
@@ -95,55 +154,76 @@ func CommitFile(ctx *probot.Context, repoName, branchName, commitMessage, filePa
 	return nil
 }
 
-func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessage string, filePaths []string) error {
+func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessage string, filePaths []string, init bool, repoPath string) error {
 	parts := strings.Split(repoName, "/")
+	if len(parts) != 2 {
+		slog.Error("Invalid repository name format", "repoName", repoName)
+		return errors.New("invalid repository name format, expected 'owner/repo'")
+	}
 	owner := parts[0]
 	repo := parts[1]
 
 	slog.Info("Committing multiple files to branch", "branch", branchName, "fileCount", len(filePaths))
 
-	// Get the current commit SHA for the branch
-	ref, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "refs/heads/"+branchName)
+	// ✅ Use "heads/<branch>" (NOT "refs/heads/<branch>")
+	ref, _, err := ctx.GitHub.Git.GetRef(context.Background(), owner, repo, "heads/"+branchName)
 	if err != nil {
-		slog.Error("Failed to get branch reference", "error", err)
+		slog.Error("Failed to get branch reference", "error", err, "branch", branchName)
 		return err
 	}
 
 	// Get the tree SHA from the current commit
 	commit, _, err := ctx.GitHub.Git.GetCommit(context.Background(), owner, repo, ref.Object.GetSHA())
 	if err != nil {
-		slog.Error("Failed to get commit", "error", err)
+		slog.Error("Failed to get commit", "error", err, "sha", ref.Object.GetSHA())
 		return err
 	}
 
 	// Create tree entries for all files
 	var entries []*github.TreeEntry
 	for _, filePath := range filePaths {
-		// Read file content
+		// Read file content from the local repo checkout
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			slog.Error("Failed to read file", "file", filePath, "error", err)
+			slog.Error("Failed to read file locally", "file", filePath, "error", err)
 			return err
 		}
 
-		// Get relative path within the repo (remove the temp repo path prefix)
-		fileName := filepath.Base(filePath)
-		// For .devflow files, we want them in the .devflow directory
-		repoFilePath := ".devflow/" + fileName
+		// Compute repo-relative path
+		repoFilePath, err := filepath.Rel(repoPath, filePath)
+		if err != nil {
+			return fmt.Errorf("failed to calculate relative path for %s using root %s: %w", filePath, repoPath, err)
+		}
+
+		// If this is the "init" case, place files under .devflow/
+		if init {
+			fileName := filepath.Base(filePath)
+			repoFilePath = ".devflow/" + fileName
+		}
+
+		// ✅ CRITICAL: normalize path to POSIX (Git tree paths must use forward slashes)
+		repoFilePath = filepath.ToSlash(repoFilePath)
+		// Trim any accidental "./"
+		repoFilePath = strings.TrimPrefix(repoFilePath, "./")
+		// Safety: do not allow escaping the repo root
+		if strings.HasPrefix(repoFilePath, "../") {
+			return fmt.Errorf("refusing to commit path outside repo: %s", repoFilePath)
+		}
+
+		contentStr := string(content)
 
 		// Create blob
 		blob := &github.Blob{
-			Content:  github.String(string(content)),
+			Content:  &contentStr,
 			Encoding: github.String("utf-8"),
 		}
-
 		createdBlob, _, err := ctx.GitHub.Git.CreateBlob(context.Background(), owner, repo, blob)
 		if err != nil {
-			slog.Error("Failed to create blob", "file", fileName, "error", err)
+			slog.Error("Failed to create blob for content", "repoPath", repoFilePath, "error", err)
 			return err
 		}
 
-		// Create tree entry
+		// Create tree entry (path MUST be POSIX style)
 		entry := &github.TreeEntry{
 			Path: github.String(repoFilePath),
 			Mode: github.String("100644"),
@@ -153,12 +233,11 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 		entries = append(entries, entry)
 	}
 
-	// Create new tree
+	// Create new tree against current base tree
 	treeEntries := make([]github.TreeEntry, len(entries))
 	for i, entry := range entries {
 		treeEntries[i] = *entry
 	}
-
 	newTree, _, err := ctx.GitHub.Git.CreateTree(context.Background(), owner, repo, commit.Tree.GetSHA(), treeEntries)
 	if err != nil {
 		slog.Error("Failed to create tree", "error", err)
@@ -171,14 +250,13 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 		Tree:    newTree,
 		Parents: []github.Commit{*commit},
 	}
-
 	createdCommit, _, err := ctx.GitHub.Git.CreateCommit(context.Background(), owner, repo, newCommit)
 	if err != nil {
 		slog.Error("Failed to create commit", "error", err)
 		return err
 	}
 
-	// Update branch reference
+	// Move branch to the new commit
 	ref.Object.SHA = createdCommit.SHA
 	_, _, err = ctx.GitHub.Git.UpdateRef(context.Background(), owner, repo, ref, false)
 	if err != nil {
@@ -186,7 +264,8 @@ func CommitMultipleFiles(ctx *probot.Context, repoName, branchName, commitMessag
 		return err
 	}
 
-	slog.Info("Successfully committed multiple files", "branch", branchName, "fileCount", len(filePaths), "commit", createdCommit.GetSHA())
+	slog.Info("Successfully committed multiple files",
+		"branch", branchName, "fileCount", len(filePaths), "commit", createdCommit.GetSHA())
 	return nil
 }
 
@@ -319,4 +398,24 @@ func SaveAnalysisToFile(content, filePath string) error {
 	}
 	slog.Info("Analysis saved successfully", "file", filePath)
 	return nil
+}
+
+func ensureCommitAvailable(repoPath, sha string) error {
+	if sha == "" {
+		return nil
+	}
+	if _, err := git(repoPath, "cat-file", "-e", sha+"^{commit}"); err == nil {
+		return nil
+	}
+	if _, err := git(repoPath, "fetch", "origin", sha); err == nil {
+		if _, err2 := git(repoPath, "cat-file", "-e", sha+"^{commit}"); err2 == nil {
+			return nil
+		}
+	}
+	if _, err := git(repoPath, "fetch", "--unshallow"); err == nil {
+		if _, err2 := git(repoPath, "cat-file", "-e", sha+"^{commit}"); err2 == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("commit %s not available locally after fetch/unshallow", sha)
 }

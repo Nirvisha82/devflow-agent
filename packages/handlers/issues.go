@@ -8,11 +8,25 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/go-github/github"
 	"github.com/swinton/go-probot/probot"
 )
+
+// ensureClosingLink prepends "Closes #<n>" unless a closing keyword is already present.
+func ensureClosingLink(prBody string, issueNumber int) string {
+	linkLine := fmt.Sprintf("Closes #%d", issueNumber)
+	low := strings.ToLower(prBody)
+	if strings.Contains(low, "closes #") || strings.Contains(low, "fixes #") || strings.Contains(low, "resolves #") {
+		return prBody
+	}
+	if prBody == "" {
+		return linkLine
+	}
+	return linkLine + "\n\n" + prBody
+}
 
 func HandleIssues(ctx *probot.Context) error {
 	// Your existing issue handling logic
@@ -33,7 +47,6 @@ func HandleIssues(ctx *probot.Context) error {
 	case "opened":
 		slog.Info("Issue opened - will process when labeled", "issueNumber", issueNumber)
 		return nil
-		// return handleIssueOpened(ctx, event, repoName, issueNumber, issueTitle)
 	case "labeled":
 		return handleIssueLabeled(ctx, event, repoName, issueNumber, issueTitle)
 	default:
@@ -84,139 +97,175 @@ func processIssue(ctx *probot.Context, repoName string, issueNumber int, issueTi
 	event := ctx.Payload.(*github.IssuesEvent)
 	branchName := fmt.Sprintf("%s%d-%s", cfg.Issues.BranchPrefix, issueNumber, repoActions.SanitizeBranchName(issueTitle))
 
-	slog.Info("Starting three-agent workflow", "issueNumber", issueNumber, "branch", branchName)
+	slog.Info("Starting Python Strands agent workflow", "issueNumber", issueNumber, "branch", branchName)
 
-	// Clone repository temporarily
+	// Clone repository
 	repoPath, _, err := repoActions.CloneRepository(repoName)
 	if err != nil {
 		slog.Error("Failed to clone repository", "error", err)
 		return err
 	}
-	// defer func() {
-	// 	if cleanupErr := repoActions.CleanupRepo(repoPath); cleanupErr != nil {
-	// 		slog.Error("Failed to cleanup", "repoPath", repoPath, "error", cleanupErr)
-	// 	}
-	// }()
 
-	// Check if Devflow knowledge base exists
-	repoStructureFile := cfg.GetDevflowPath(repoPath, cfg.Files.StructureFile)
-	_dependecygraph := cfg.GetDevflowPath(repoPath, cfg.Files.DependencyFile)
-	slog.Debug(_dependecygraph)
-
-	// If knowledge base doesn't exist, create it first
-	if _, err := os.Stat(repoStructureFile); os.IsNotExist(err) {
-		slog.Info("Devflow knowledge base not found, creating it first")
-		if err := initializeDevflowKnowledgeBaseFromIssues(ctx, repoName); err != nil {
-			slog.Error("Failed to initialize knowledge base", "error", err)
-			return err
-		}
-		// Re-clone to get the updated knowledge base
-		if cleanupErr := repoActions.CleanupRepo(repoPath); cleanupErr != nil {
-			slog.Error("Failed to cleanup after knowledge base creation", "error", cleanupErr)
-		}
-		_, _, err = repoActions.CloneRepository(repoName)
-		if err != nil {
-			slog.Error("Failed to re-clone repository", "error", err)
-			return err
-		}
-	}
-
-	// Agent A: File Selector/Planner
-	slog.Info("Running Agent A: File Selector/Planner")
-	agentA := &ai.AgentA{
-		IssueTitle:       issueTitle,
-		IssueDescription: event.Issue.GetBody(),
-		Labels:           getIssueLabelNames(event.Issue.Labels),
-		RepoAnalysisFile: repoStructureFile,
-	}
-
-	agentAResult, err := ai.AnalyzeIssueWithAgentA(agentA)
+	// --- Ensure .devflow reflects latest origin/main BEFORE invoking Python agent ---
+	headSHA, err := repoActions.GetOriginMainSHA(repoPath)
 	if err != nil {
-		slog.Error("Agent A failed", "error", err)
+		slog.Error("Failed to resolve origin/main", "error", err)
+		return err
+	}
+	devflowCommitPath := filepath.Join(repoPath, ".devflow", "devflow-commit.txt")
+	devflowSHA := ""
+	if b, err := os.ReadFile(devflowCommitPath); err == nil {
+		devflowSHA = strings.TrimSpace(string(b))
+	}
+	if devflowSHA != headSHA {
+		slog.Info("Devflow stale; syncing", "devflow", devflowSHA, "head", headSHA)
+		if err := repoActions.RunIncrementalDevflowSync(ctx, repoName, repoPath, headSHA); err != nil {
+			slog.Error("Devflow incremental sync failed", "error", err)
+			return err
+		}
+		// refresh HEAD just in case
+		if _, err := repoActions.GetOriginMainSHA(repoPath); err != nil {
+			slog.Warn("Post-sync fetch failed", "error", err)
+		}
+	}
+
+	// Check if knowledge base exists
+	repoStructureFile := cfg.GetDevflowPath(repoPath, cfg.Files.StructureFile)
+	if _, err := os.Stat(repoStructureFile); os.IsNotExist(err) {
+		slog.Error("Devflow knowledge base not initialized for repo", "repo", repoName)
+
+		// Post a helpful comment on the issue instead of trying to initialize here
+		issue := event.Issue
+		owner := event.GetRepo().GetOwner().GetLogin()
+		name := event.GetRepo().GetName()
+
+		commentBody := `DevFlow isn't fully set up for this repository yet.
+
+	Please merge the "Initialize Devflow Knowledge Base" PR (branch "devflow-init") that DevFlow created for this repo, and then re-apply the label to this issue.`
+
+		_, _, cErr := ctx.GitHub.Issues.CreateComment(
+			context.Background(),
+			owner,
+			name,
+			int(issue.GetNumber()),
+			&github.IssueComment{Body: &commentBody},
+		)
+		if cErr != nil {
+			slog.Error("Failed to post missing-knowledge-base comment", "error", cErr)
+		}
+
+		return fmt.Errorf("devflow knowledge base not initialized for repo %s", repoName)
+	}
+
+	// Call Python Strands agent
+	result, err := ai.CallPythonStrandsAgent(repoPath, event.Issue)
+	if err != nil {
+		slog.Error("Python agent failed", "error", err)
 		return err
 	}
 
-	slog.Info("Agent A completed", "relevantFiles", agentAResult.RelevantFiles, "plan", agentAResult.Plan)
-
-	// // Agent B: Code Analyzer/Suggester
-	// slog.Info("Running Agent B: Code Analyzer/Suggester")
-	// agentB := &ai.AgentB{
-	// 	AgentAResult:     agentAResult,
-	// 	IssueTitle:       issueTitle,
-	// 	IssueDescription: event.Issue.GetBody(),
-	// 	RepoPath:         repoPath,
-	// 	DependencyGraph:  dependencyGraphFile,
-	// }
-
-	// agentBResult, err := ai.AnalyzeWithAgentB(agentB)
-	// if err != nil {
-	// 	slog.Error("Agent B failed", "error", err)
-	// 	return err
-	// }
-
-	// slog.Info("Agent B completed", "suggestions", len(agentBResult.CodeSuggestions))
-
-	// // Agent C: Code Generator/Implementer
-	// slog.Info("Running Agent C: Code Generator/Implementer")
-	// agentC := &ai.AgentC{
-	// 	AgentBResult:     agentBResult,
-	// 	IssueTitle:       issueTitle,
-	// 	IssueDescription: event.Issue.GetBody(),
-	// 	RepoPath:         repoPath,
-	// 	BranchName:       branchName,
-	// }
-
-	// agentCResult, err := ai.ImplementWithAgentC(agentC)
-	// if err != nil {
-	// 	slog.Error("Agent C failed", "error", err)
-	// 	return err
-	// }
-
-	// if !agentCResult.Success {
-	// 	slog.Error("Agent C implementation failed", "error", agentCResult.Error)
-	// 	return fmt.Errorf("implementation failed: %s", agentCResult.Error)
-	// }
-
-	// slog.Info("Agent C completed", "modifiedFiles", agentCResult.ModifiedFiles)
+	// Use the results
+	for _, file := range result.ChangesMade {
+		fmt.Printf("Changed: %s\n", file)
+	}
 
 	// Create branch and commit changes
-	// err = repoActions.CreateBranch(ctx, repoName, branchName)
-	// if err != nil {
-	// 	slog.Error("Failed to create branch", "error", err)
-	// 	return err
-	// }
+	if len(result.ChangesMade) > 0 {
+		if err := repoActions.CreateBranch(ctx, repoName, branchName); err != nil {
+			slog.Error("Failed to create branch", "error", err)
+			return err
+		}
 
-	// // Commit all modified files
-	// for _, file := range agentCResult.ModifiedFiles {
-	// 	fullPath := repoPath + "/" + file
-	// 	err = repoActions.CommitFile(ctx, repoName, branchName, agentCResult.CommitMessage, fullPath)
-	// 	if err != nil {
-	// 		slog.Error("Failed to commit file", "file", file, "error", err)
-	// 		return err
-	// 	}
-	// }
+		commitMessage := fmt.Sprintf("Resolve issue #%d: %s\n\n%s", issueNumber, issueTitle, result.Summary)
 
-	// // Create summary document
-	// summaryFile := repoPath + "/devflow-implementation-summary.md"
-	// err = repoActions.SaveAnalysisToFile(agentCResult.Summary, summaryFile)
-	// if err != nil {
-	// 	slog.Error("Failed to save implementation summary", "error", err)
-	// 	return err
-	// }
+		// Convert relative paths to absolute for commit
+		absolutePaths := make([]string, len(result.ChangesMade))
+		for i, relPath := range result.ChangesMade {
+			absolutePaths[i] = filepath.Join(repoPath, relPath)
+		}
 
-	// // Commit summary
-	// err = repoActions.CommitFile(ctx, repoName, branchName, "Add implementation summary", summaryFile)
-	// if err != nil {
-	// 	slog.Error("Failed to commit summary", "error", err)
-	// 	return err
-	// }
+		if err := repoActions.CommitMultipleFiles(ctx, repoName, branchName, commitMessage, absolutePaths, false, repoPath); err != nil {
+			slog.Error("Failed to commit files", "error", err)
+			return err
+		}
 
-	// TODO: Create Pull Request
-	// This would require additional GitHub API calls to create a PR
-	// slog.Info("Three-agent workflow completed successfully",
-	// 	"issueNumber", issueNumber,
-	// 	"branch", branchName,
-	// 	"modifiedFiles", len(agentCResult.ModifiedFiles))
+		// Create PR with AI-generated body if available
+		var pr *github.PullRequest
+		if result.PRBodyFile != "" {
+			// Read the generated PR body
+			prBodyPath := filepath.Join(repoPath, result.PRBodyFile)
+			slog.Info("Attempting to read AI-generated PR body", "path", prBodyPath)
+
+			prBodyContent, err := os.ReadFile(prBodyPath)
+			if err != nil {
+				slog.Warn("Failed to read generated PR body, using fallback", "error", err, "path", prBodyPath)
+				// Fallback to default PR creation
+				pr, err = repoActions.CreateIssueResolutionPR(
+					ctx,
+					repoName,
+					branchName,
+					issueNumber,
+					issueTitle,
+					result.Summary,
+					fmt.Sprintf("Modified files:\n- %s", strings.Join(result.ChangesMade, "\n- ")),
+					"Please review the automated changes generated by the AI agent.",
+				)
+				if err != nil {
+					slog.Error("Failed to create PR with fallback", "error", err)
+					return err
+				}
+			} else {
+				// Use the AI-generated PR body directly
+				prTitle := fmt.Sprintf("[#%d] %s", issueNumber, issueTitle) // neutral title is fine
+				bodyWithLink := ensureClosingLink(string(prBodyContent), issueNumber)
+
+				slog.Info("Creating PR with AI-generated body", "length", len(bodyWithLink))
+				pr, err = repoActions.CreatePullRequest(ctx, repoName, branchName, prTitle, bodyWithLink)
+
+				if err != nil {
+					slog.Error("Failed to create PR with AI-generated body", "error", err)
+					return err
+				}
+				slog.Info("PR created successfully with AI-generated description")
+			}
+		} else {
+			slog.Info("No PR body file returned by agent, composing PR body with closing link")
+
+			prTitle := fmt.Sprintf("[#%d] %s", issueNumber, issueTitle)
+
+			baseBody := fmt.Sprintf(
+				"Summary:\n%s\n\nModified files:\n- %s\n\nPlease review the automated changes generated by the AI agent.",
+				result.Summary,
+				strings.Join(result.ChangesMade, "\n- "),
+			)
+
+			bodyWithLink := ensureClosingLink(baseBody, issueNumber)
+
+			pr, err = repoActions.CreatePullRequest(ctx, repoName, branchName, prTitle, bodyWithLink)
+			if err != nil {
+				slog.Error("Failed to create PR", "error", err)
+				return err
+			}
+		}
+
+		slog.Info("Python agent workflow completed successfully",
+			"issueNumber", issueNumber,
+			"branch", branchName,
+			"prNumber", pr.GetNumber(),
+			"prURL", pr.GetHTMLURL(),
+			"modifiedFiles", len(result.ChangesMade))
+	} else {
+		slog.Info("No files were modified by the agent", "issueNumber", issueNumber)
+	}
+
+	// Cleanup
+	if cfg.Repository.CleanupTempRepos {
+		if cleanupErr := repoActions.CleanupRepo(repoPath); cleanupErr != nil {
+			slog.Error("Failed to cleanup temporary repository", "error", cleanupErr)
+		} else {
+			slog.Info("Temporary repository cleaned up", "repoPath", repoPath)
+		}
+	}
 
 	return nil
 }
@@ -364,7 +413,7 @@ func initializeDevflowKnowledgeBaseFromIssues(ctx *probot.Context, repoName stri
 	}
 
 	// Commit all files in a single commit
-	if err := repoActions.CommitMultipleFiles(ctx, repoName, branchName, cfg.Installations.KnowledgeBaseCommit, devflowFiles); err != nil {
+	if err := repoActions.CommitMultipleFiles(ctx, repoName, branchName, cfg.Installations.KnowledgeBaseCommit, devflowFiles, true, ""); err != nil {
 		slog.Error("Failed to commit Devflow files", "error", err)
 		return err
 	}

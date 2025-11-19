@@ -7,8 +7,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
+	"google.golang.org/genai"
 )
 
 type IssueAnalysis struct {
@@ -76,22 +75,19 @@ func AnalyzeIssueWithAI(analysis *IssueAnalysis) (*AnalysisResult, error) {
 	}
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+
+	// Create client using new SDK
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+	})
 	if err != nil {
 		slog.Error("Failed to create Gemini client", "error", err)
 		return nil, err
 	}
-	defer client.Close()
 
 	// Use configured model
 	cfg := config.GetConfig()
-	model := client.GenerativeModel(cfg.AI.Model)
-
-	// Configure model settings
-	model.SetTemperature(cfg.AI.Temperature)
-	model.SetTopK(cfg.AI.TopK)
-	model.SetTopP(cfg.AI.TopP)
-	model.SetMaxOutputTokens(cfg.AI.MaxOutputTokens)
 
 	// Read repository structure file
 	repoContent, err := os.ReadFile(analysis.RepoStructFile)
@@ -105,19 +101,37 @@ func AnalyzeIssueWithAI(analysis *IssueAnalysis) (*AnalysisResult, error) {
 
 	slog.Info("Sending request to Gemini API", "issueTitle", analysis.IssueTitle)
 
+	// Create generation config - use float64 and int types
+	temperature := float32(cfg.AI.Temperature)
+	topK := float32(cfg.AI.TopK)
+	topP := float32(cfg.AI.TopP)
+	maxTokens := int32(cfg.AI.MaxOutputTokens)
+
+	genConfig := &genai.GenerateContentConfig{
+		Temperature:     &temperature,
+		TopK:            &topK,
+		TopP:            &topP,
+		MaxOutputTokens: maxTokens,
+	}
+
 	// Generate content
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	result, err := client.Models.GenerateContent(
+		ctx,
+		cfg.AI.Model,
+		genai.Text(prompt),
+		genConfig,
+	)
 	if err != nil {
 		slog.Error("Failed to generate content", "error", err)
 		return nil, err
 	}
 
-	// Extract response
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+	// Extract response text
+	if result == nil || result.Text() == "" {
 		return nil, fmt.Errorf("no content generated")
 	}
 
-	markdownContent := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+	markdownContent := result.Text()
 
 	slog.Info("Successfully generated analysis", "contentLength", len(markdownContent))
 
@@ -180,41 +194,56 @@ func AnalyzeRepositoryWithAI(analysis *RepoAnalysis) (*AnalysisResult, error) {
 	}
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+
+	// Create client using new SDK
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+	})
 	if err != nil {
 		slog.Error("Failed to create Gemini client", "error", err)
 		return nil, err
 	}
-	defer client.Close()
 
 	// Use configured model
 	cfg := config.GetConfig()
-	model := client.GenerativeModel(cfg.AI.Model)
-
-	// Configure model settings for repository analysis
-	model.SetTemperature(cfg.AI.RepoAnalysisTemperature) // Lower temperature for more consistent analysis
-	model.SetTopK(cfg.AI.TopK)
-	model.SetTopP(cfg.AI.TopP)
-	model.SetMaxOutputTokens(cfg.AI.MaxOutputTokens)
 
 	// Build the prompt
 	prompt := BuildRepoAnalysisPrompt(analysis)
 
 	slog.Info("Sending repository analysis request to Gemini API", "repoURL", analysis.RepoURL, "fileCount", len(analysis.Files))
 
+	// Create generation config with lower temperature for more consistent analysis
+	temperature := float32(cfg.AI.RepoAnalysisTemperature)
+	topK := float32(cfg.AI.TopK)
+	topP := float32(cfg.AI.TopP)
+	maxTokens := int32(cfg.AI.MaxOutputTokens)
+
+	genConfig := &genai.GenerateContentConfig{
+		Temperature:     &temperature,
+		TopK:            &topK,
+		TopP:            &topP,
+		MaxOutputTokens: maxTokens,
+	}
+
 	// Generate content
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	result, err := client.Models.GenerateContent(
+		ctx,
+		cfg.AI.Model,
+		genai.Text(prompt),
+		genConfig,
+	)
 	if err != nil {
 		slog.Error("Failed to generate repository analysis", "error", err)
 		return nil, err
 	}
 
-	// Extract response
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+	// Extract response text
+	if result == nil || result.Text() == "" {
 		return nil, fmt.Errorf("no content generated")
 	}
 
-	markdownContent := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+	markdownContent := result.Text()
 
 	slog.Info("Successfully generated repository analysis", "contentLength", len(markdownContent))
 
@@ -310,22 +339,19 @@ func AnalyzeRepositoryFromStructure(analysis *RepoAnalysisFromStructure) (*Analy
 	}
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+
+	// Create client using new SDK
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+	})
 	if err != nil {
 		slog.Error("Failed to create Gemini client", "error", err)
 		return nil, err
 	}
-	defer client.Close()
 
 	// Use configured model
 	cfg := config.GetConfig()
-	model := client.GenerativeModel(cfg.AI.Model)
-
-	// Configure model settings for repository analysis
-	model.SetTemperature(cfg.AI.RepoAnalysisTemperature)
-	model.SetTopK(cfg.AI.TopK)
-	model.SetTopP(cfg.AI.TopP)
-	model.SetMaxOutputTokens(cfg.AI.MaxOutputTokens)
 
 	// Build the prompt using repo structure content
 	prompt := fmt.Sprintf(`You are an expert code analyst. Analyze the following repository and provide comprehensive insights about the codebase.
@@ -370,19 +396,36 @@ Format your response in clean markdown with appropriate headers and code blocks.
 
 	slog.Info("Sending repository analysis request to Gemini API", "repoURL", analysis.RepoURL)
 
+	// Create generation config
+	temperature := float32(cfg.AI.RepoAnalysisTemperature)
+	topK := float32(cfg.AI.TopK)
+	topP := float32(cfg.AI.TopP)
+	maxTokens := int32(cfg.AI.MaxOutputTokens)
+	genConfig := &genai.GenerateContentConfig{
+		Temperature:     &temperature,
+		TopK:            &topK,
+		TopP:            &topP,
+		MaxOutputTokens: maxTokens,
+	}
+
 	// Generate content
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	result, err := client.Models.GenerateContent(
+		ctx,
+		cfg.AI.Model,
+		genai.Text(prompt),
+		genConfig,
+	)
 	if err != nil {
 		slog.Error("Failed to generate repository analysis", "error", err)
 		return nil, err
 	}
 
-	// Extract response
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+	// Extract response text
+	if result == nil || result.Text() == "" {
 		return nil, fmt.Errorf("no content generated")
 	}
 
-	markdownContent := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+	markdownContent := result.Text()
 
 	slog.Info("Successfully generated repository analysis", "contentLength", len(markdownContent))
 

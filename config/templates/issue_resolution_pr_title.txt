@@ -1,1 +1,1 @@
-🔧 Resolve Issue #{issue_number}: {issue_title}
+🔧 Resolve Issue: {issue_title}

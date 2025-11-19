@@ -45,6 +45,8 @@ func main() {
 	probot.HandleEvent("issues", handlers.HandleIssues)
 	probot.HandleEvent("installation_repositories", handlers.HandleInstallations)
 
+	probot.HandleEvent("pull_request", handlers.HandlePullRequest)
+
 	// Start the bot
 	probot.Start()
 }
